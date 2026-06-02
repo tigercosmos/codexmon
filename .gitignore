@@ -1,0 +1,8 @@
+# Build output
+/codexmon
+/dist/
+*.out
+
+# Editor / OS noise
+.DS_Store
+*.swp
