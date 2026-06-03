@@ -27,10 +27,13 @@ install: build
 	@echo "installed $(BINARY) $(VERSION) -> $(BINDIR)/$(BINARY)"
 	@$(MAKE) --no-print-directory install-skill
 
-# Install just the agent skill into $(SKILLS_DIR)/codexmon.
+# Install just the agent skill into $(SKILLS_DIR)/codexmon. When run under sudo,
+# the files land in the invoking user's home and are chown'd back to them, so
+# they aren't left owned by root.
 install-skill:
 	@mkdir -p "$(SKILLS_DIR)/$(BINARY)"
 	@cp -R skills/$(BINARY)/. "$(SKILLS_DIR)/$(BINARY)/"
+	@if [ -n "$$SUDO_USER" ]; then chown -R "$$SUDO_USER" "$(SKILLS_DIR)/$(BINARY)" 2>/dev/null || true; fi
 	@echo "installed skill -> $(SKILLS_DIR)/$(BINARY)/"
 
 uninstall:
