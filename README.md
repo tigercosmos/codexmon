@@ -71,13 +71,25 @@ monitor itself.
 
 ## Install
 
-Requires **Go 1.24+** and the **`codex`** CLI on your `PATH`.
+codexmon runs on **macOS and Linux** (arm64 / amd64) and needs the **`codex`**
+CLI on your `PATH`.
+
+**Prebuilt binary** — download for your platform from the
+[latest release](https://github.com/tigercosmos/codexmon/releases/latest):
 
 ```sh
-go install github.com/tigercosmos/codexmon/cmd/codexmon@latest
+# example: macOS (arm64) — pick the matching asset for your OS/arch
+curl -sSL https://github.com/tigercosmos/codexmon/releases/latest/download/codexmon_VERSION_darwin_arm64.tar.gz \
+  | tar -xz && sudo mv codexmon_*/codexmon /usr/local/bin/
+```
+
+**With Go** (1.24+):
+
+```sh
+go install github.com/tigercosmos/codexmon/cmd/codexmon@latest   # → $GOBIN
 # or from a clone:
-make install         # → $GOBIN/codexmon   (ensure it's on PATH)
 make build           # → ./codexmon
+make install         # → $GOBIN/codexmon   (ensure it's on PATH)
 ```
 
 Confirm your environment is ready:
@@ -207,6 +219,16 @@ phase, elapsed/idle seconds, last event, token usage, result preview — so an
 agent can branch on the outcome without parsing prose. To skip permission
 prompts, allow `Bash(codexmon:*)` in `.claude/settings.json`.
 
+**Drop-in agent skill.** [`skills/codexmon/SKILL.md`](skills/codexmon/SKILL.md)
+is a ready-made skill that teaches an agent the whole loop above. Install it for
+Claude Code by copying the folder into your skills directory:
+
+```sh
+cp -r skills/codexmon ~/.claude/skills/        # user-wide
+# or project-local:
+cp -r skills/codexmon .claude/skills/
+```
+
 > **Tip:** if a review stalls on an MCP tool that's configured in
 > `~/.codex/config.toml`, you can run it MCP-free with
 > `codexmon exec review --uncommitted --ignore-user-config` (codex still uses
@@ -276,6 +298,21 @@ internal/codexcli     locate codex; analyze args; inject --json
 internal/proc         process-group lifecycle (stdin guard, group kill)
 internal/render       human-readable status/result formatting
 e2e                   end-to-end tests against a fake codex
+```
+
+### Releasing
+
+Releases are cut by GoReleaser from a version tag, via
+[`.github/workflows/release.yml`](.github/workflows/release.yml):
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0     # CI builds + publishes the release
+```
+
+To build the same cross-platform archives locally (no goreleaser required):
+
+```sh
+make dist          # → dist/codexmon_<version>_<os>_<arch>.tar.gz + SHA256SUMS
 ```
 
 ## License
