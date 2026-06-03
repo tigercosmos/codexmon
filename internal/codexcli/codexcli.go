@@ -26,7 +26,8 @@ var flagsTakingValue = map[string]bool{
 	"--local-provider": true,
 	"-p":               true, "--profile": true,
 	"--profile-v2": true,
-	"--enable":     true, "--disable": true,
+	"-a":           true, "--ask-for-approval": true,
+	"--enable": true, "--disable": true,
 	"--remote": true, "--remote-auth-token-env": true,
 	"-m": true, "--model": true,
 	"-i": true, "--image": true,
@@ -105,10 +106,14 @@ func Analyze(args []string, resultFile string, allowJSON bool) Analysis {
 	if subIdx >= 0 {
 		sub = args[subIdx]
 	}
-	isExec := sub == "exec"
+	isExec := isExecToken(sub)
 	title := "codex"
 	if sub != "" {
-		title = "codex " + sub
+		label := sub
+		if isExec {
+			label = "exec" // normalize the `e` alias to `exec` in the title
+		}
+		title = "codex " + label
 		// `exec` has its own sub-subcommands; surface them in the title, but
 		// don't mistake a free-text prompt for one.
 		if isExec {
@@ -137,6 +142,11 @@ func Analyze(args []string, resultFile string, allowJSON bool) Analysis {
 	}
 
 	return Analysis{IsExec: isExec, JSONMode: jsonMode, Args: out, Title: title}
+}
+
+// isExecToken reports whether tok is the codex `exec` subcommand or its alias `e`.
+func isExecToken(tok string) bool {
+	return tok == "exec" || tok == "e"
 }
 
 // isExecSubcommand reports whether tok is one of `codex exec`'s sub-subcommands

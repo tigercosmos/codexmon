@@ -95,6 +95,36 @@ func TestAnalyzeInjectionPositionWithExecValue(t *testing.T) {
 	}
 }
 
+func TestSubcommandSkipsApprovalValue(t *testing.T) {
+	// -a/--ask-for-approval takes a value; "never" must not be read as the subcommand.
+	if got := Subcommand([]string{"-a", "never", "exec", "hi"}); got != "exec" {
+		t.Errorf("Subcommand with -a = %q, want exec", got)
+	}
+	if got := Subcommand([]string{"--ask-for-approval", "on-request", "exec"}); got != "exec" {
+		t.Errorf("Subcommand with --ask-for-approval = %q, want exec", got)
+	}
+}
+
+func TestAnalyzeApprovalFlagStillDetectsExec(t *testing.T) {
+	a := Analyze([]string{"-a", "never", "exec", "hi"}, "/tmp/r", true)
+	if !a.IsExec || !a.JSONMode || !hasFlag(a.Args, "--json") {
+		t.Fatalf("-a value should not break exec detection: %+v", a)
+	}
+}
+
+func TestAnalyzeExecAlias(t *testing.T) {
+	a := Analyze([]string{"e", "review", "--uncommitted"}, "/tmp/r", true)
+	if !a.IsExec || !a.JSONMode {
+		t.Fatalf("`e` alias should be treated as exec: %+v", a)
+	}
+	if a.Args[0] != "e" || a.Args[1] != "--json" {
+		t.Errorf("--json not injected after `e`: %v", a.Args)
+	}
+	if a.Title != "codex exec review" {
+		t.Errorf("title = %q, want 'codex exec review' (alias normalized)", a.Title)
+	}
+}
+
 func TestAnalyzeNonExecNoJSON(t *testing.T) {
 	a := Analyze([]string{"review", "--base", "main"}, "/tmp/result.txt", true)
 	if a.IsExec || a.JSONMode {

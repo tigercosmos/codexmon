@@ -4,6 +4,9 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -46,6 +49,38 @@ func TestSetChildGroupAndTerminate(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("TerminateGroup did not stop the child")
 	}
+}
+
+func TestTerminateGroupEscalatesToSurvivingDescendant(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix-only process group test")
+	}
+	// Leader spawns a SIGTERM-ignoring grandchild (stdout to /dev/null so it
+	// doesn't hold the Output pipe), prints its pid, then exits. After Output
+	// returns the leader is reaped, but the grandchild lingers in the group.
+	cmd := exec.Command("sh", "-c", `sh -c 'trap "" TERM; sleep 30' >/dev/null 2>&1 & echo $!; exit 0`)
+	SetChildGroup(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	childPID, _ := strconv.Atoi(strings.TrimSpace(string(out)))
+	if childPID <= 0 || !Alive(childPID) {
+		t.Skipf("could not set up a surviving descendant (pid=%d)", childPID)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
+
+	leaderPID := cmd.Process.Pid // reaped; probing it alone would miss the child
+	TerminateGroup(leaderPID, 300*time.Millisecond)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if !Alive(childPID) {
+			return // escalated SIGKILL reached the surviving descendant
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("surviving descendant %d ignored SIGTERM and was not SIGKILLed", childPID)
 }
 
 func TestSetDetachedSetsSid(t *testing.T) {

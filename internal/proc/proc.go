@@ -44,6 +44,17 @@ func Alive(pid int) bool {
 	return syscall.Kill(pid, 0) == nil
 }
 
+// groupAlive reports whether any process remains in the group led by pid.
+// kill(-pgid, 0) succeeds while the group has at least one member and returns
+// ESRCH once it is empty — unlike probing the leader pid, which can be gone
+// while descendants linger.
+func groupAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	return syscall.Kill(-pid, 0) == nil
+}
+
 // TerminateGroup asks the process group led by pid to stop: SIGTERM first, then
 // SIGKILL after grace if anything is still alive. The negative pid targets the
 // whole group. It is safe to call on a dead process.
@@ -57,14 +68,16 @@ func TerminateGroup(pid int, grace time.Duration) {
 	}
 	deadline := time.Now().Add(grace)
 	for time.Now().Before(deadline) {
-		if !Alive(pid) {
+		// Probe the whole group, not just the leader: the leader can exit while
+		// a descendant keeps running (and holding, e.g., a pipe). Returning on
+		// leader death alone would skip the SIGKILL escalation for that child.
+		if !groupAlive(pid) {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	// Group-only SIGKILL. SetChildGroup guarantees the group id equals the
-	// leader pid, so this covers the leader and its descendants. We deliberately
-	// do NOT also send a positive-pid SIGKILL: once the leader has exited and
-	// been reaped, its pid may have been recycled by an unrelated process.
+	// Escalate to the whole group. Harmless if the group is already empty
+	// (ESRCH). We deliberately do NOT also send a positive-pid SIGKILL: once the
+	// leader has been reaped its pid may have been recycled by another process.
 	_ = syscall.Kill(-pid, syscall.SIGKILL)
 }
