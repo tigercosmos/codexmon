@@ -6,7 +6,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VERSION="${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}"
-LDFLAGS="-s -w -X github.com/tigercosmos/codexmon/internal/cli.Version=${VERSION}"
+# Match goreleaser: it strips a leading "v" from the version for both the binary
+# string and the archive name, and archives are flat (no wrapping directory).
+VER="${VERSION#v}"
+LDFLAGS="-s -w -X github.com/tigercosmos/codexmon/internal/cli.Version=${VER}"
 PLATFORMS=(darwin/amd64 darwin/arm64 linux/amd64 linux/arm64)
 DIST="dist"
 
@@ -15,14 +18,14 @@ mkdir -p "$DIST"
 
 for p in "${PLATFORMS[@]}"; do
   os="${p%/*}"; arch="${p#*/}"
-  name="codexmon_${VERSION}_${os}_${arch}"
-  stage="$DIST/$name"
+  name="codexmon_${VER}_${os}_${arch}"
+  stage="$DIST/.stage"
   echo "building ${os}/${arch} -> ${name}.tar.gz"
-  mkdir -p "$stage"
+  rm -rf "$stage"; mkdir -p "$stage"
   GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
     go build -trimpath -ldflags "$LDFLAGS" -o "$stage/codexmon" ./cmd/codexmon
   cp README.md LICENSE "$stage/"
-  tar -C "$DIST" -czf "$DIST/${name}.tar.gz" "$name"
+  tar -C "$stage" -czf "$DIST/${name}.tar.gz" codexmon README.md LICENSE
   rm -rf "$stage"
 done
 

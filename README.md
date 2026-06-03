@@ -74,14 +74,19 @@ monitor itself.
 codexmon runs on **macOS and Linux** (arm64 / amd64) and needs the **`codex`**
 CLI on your `PATH`.
 
-**Prebuilt binary** — download for your platform from the
-[latest release](https://github.com/tigercosmos/codexmon/releases/latest):
+**Prebuilt binary** — grab the archive for your OS/arch from the
+[latest release](https://github.com/tigercosmos/codexmon/releases/latest)
+(`darwin`/`linux` × `arm64`/`amd64`), then extract just the binary onto your PATH:
 
 ```sh
-# example: macOS (arm64) — pick the matching asset for your OS/arch
-curl -sSL https://github.com/tigercosmos/codexmon/releases/latest/download/codexmon_VERSION_darwin_arm64.tar.gz \
-  | tar -xz && sudo mv codexmon_*/codexmon /usr/local/bin/
+# example: macOS (Apple Silicon) — substitute your version/os/arch
+curl -sSL https://github.com/tigercosmos/codexmon/releases/download/v0.1.0/codexmon_0.1.0_darwin_arm64.tar.gz \
+  | tar -xz codexmon && sudo mv codexmon /usr/local/bin/
+codexmon version
 ```
+
+Verify the download against the release's `SHA256SUMS` if you like
+(`sha256sum -c SHA256SUMS`).
 
 **With Go** (1.24+):
 
