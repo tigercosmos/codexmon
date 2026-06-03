@@ -3,14 +3,30 @@ PKG := ./cmd/codexmon
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X github.com/tigercosmos/codexmon/internal/cli.Version=$(VERSION)
 
-.PHONY: all build install test race vet fmt fmt-check staticcheck lint cover dist snapshot clean
+# Install location for `make install` (override e.g. `make install PREFIX=$HOME/.local`).
+PREFIX ?= /usr/local
+BINDIR := $(DESTDIR)$(PREFIX)/bin
+
+.PHONY: all build install install-go uninstall test race vet fmt fmt-check staticcheck lint cover dist snapshot clean
 
 all: fmt-check vet build test
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) $(PKG)
 
-install:
+# Install the built binary to $(BINDIR) (default /usr/local/bin).
+# Use `sudo make install` if that directory isn't writable.
+install: build
+	@mkdir -p "$(BINDIR)"
+	install -m 0755 $(BINARY) "$(BINDIR)/$(BINARY)"
+	@echo "installed $(BINARY) $(VERSION) -> $(BINDIR)/$(BINARY)"
+
+uninstall:
+	rm -f "$(BINDIR)/$(BINARY)"
+	@echo "removed $(BINDIR)/$(BINARY)"
+
+# Install into the Go bin dir ($GOBIN or ~/go/bin) instead.
+install-go:
 	go install -ldflags "$(LDFLAGS)" $(PKG)
 
 test:

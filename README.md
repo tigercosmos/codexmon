@@ -93,8 +93,10 @@ Verify the download against the release's `SHA256SUMS` if you like
 ```sh
 go install github.com/tigercosmos/codexmon/cmd/codexmon@latest   # → $GOBIN
 # or from a clone:
-make build           # → ./codexmon
-make install         # → $GOBIN/codexmon   (ensure it's on PATH)
+make build                 # → ./codexmon
+sudo make install          # → /usr/local/bin/codexmon
+#   make install PREFIX=$HOME/.local   # or install elsewhere, no sudo
+#   make install-go                    # or install into $GOBIN instead
 ```
 
 Confirm your environment is ready:
