@@ -7,6 +7,17 @@
 *Run `codex` and always know whether it's healthy, slow, stalled, or done —
 so a review can never hang silently again.*
 
+[![CI](https://github.com/tigercosmos/codexmon/actions/workflows/ci.yml/badge.svg)](https://github.com/tigercosmos/codexmon/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/tigercosmos/codexmon.svg)](https://pkg.go.dev/github.com/tigercosmos/codexmon)
+[![Go Report Card](https://goreportcard.com/badge/github.com/tigercosmos/codexmon)](https://goreportcard.com/report/github.com/tigercosmos/codexmon)
+[![Go 1.24+](https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/dl/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+<!-- Demo GIF: regenerate with `make build && PATH="$PWD:$PATH" vhs docs/demo.tape`
+     (see CONTRIBUTING.md → "Recording the demo"), then uncomment the line below. -->
+<!-- ![codexmon demo](docs/demo.gif) -->
+<sub>📹 <i>Demo: <code>vhs docs/demo.tape</code> → <code>docs/demo.gif</code> (runs against a bundled fake codex — no auth needed).</i></sub>
+
 </div>
 
 ---
