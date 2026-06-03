@@ -7,25 +7,38 @@ LDFLAGS := -X github.com/tigercosmos/codexmon/internal/cli.Version=$(VERSION)
 PREFIX ?= /usr/local
 BINDIR := $(DESTDIR)$(PREFIX)/bin
 
-.PHONY: all build install install-go uninstall test race vet fmt fmt-check staticcheck lint cover dist snapshot clean
+# Where to install the agent skill. Resolve the *invoking* user's home even under
+# sudo, so `sudo make install` puts the skill in their ~/.claude, not root's.
+USER_HOME := $(shell if [ -n "$$SUDO_USER" ]; then eval echo "~$$SUDO_USER"; else echo "$$HOME"; fi)
+SKILLS_DIR ?= $(USER_HOME)/.claude/skills
+
+.PHONY: all build install install-skill install-go uninstall test race vet fmt fmt-check staticcheck lint cover dist snapshot clean
 
 all: fmt-check vet build test
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) $(PKG)
 
-# Install the built binary to $(BINDIR) (default /usr/local/bin).
-# Use `sudo make install` if that directory isn't writable.
+# Install the binary to $(BINDIR) (default /usr/local/bin) AND the agent skill to
+# $(SKILLS_DIR). Use `sudo make install` if /usr/local isn't writable.
 install: build
 	@mkdir -p "$(BINDIR)"
 	install -m 0755 $(BINARY) "$(BINDIR)/$(BINARY)"
 	@echo "installed $(BINARY) $(VERSION) -> $(BINDIR)/$(BINARY)"
+	@$(MAKE) --no-print-directory install-skill
+
+# Install just the agent skill into $(SKILLS_DIR)/codexmon.
+install-skill:
+	@mkdir -p "$(SKILLS_DIR)/$(BINARY)"
+	@cp -R skills/$(BINARY)/. "$(SKILLS_DIR)/$(BINARY)/"
+	@echo "installed skill -> $(SKILLS_DIR)/$(BINARY)/"
 
 uninstall:
 	rm -f "$(BINDIR)/$(BINARY)"
-	@echo "removed $(BINDIR)/$(BINARY)"
+	rm -rf "$(SKILLS_DIR)/$(BINARY)"
+	@echo "removed $(BINDIR)/$(BINARY) and $(SKILLS_DIR)/$(BINARY)"
 
-# Install into the Go bin dir ($GOBIN or ~/go/bin) instead.
+# Install the binary into the Go bin dir ($GOBIN or ~/go/bin) instead.
 install-go:
 	go install -ldflags "$(LDFLAGS)" $(PKG)
 

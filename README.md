@@ -94,10 +94,14 @@ Verify the download against the release's `SHA256SUMS` if you like
 go install github.com/tigercosmos/codexmon/cmd/codexmon@latest   # → $GOBIN
 # or from a clone:
 make build                 # → ./codexmon
-sudo make install          # → /usr/local/bin/codexmon
-#   make install PREFIX=$HOME/.local   # or install elsewhere, no sudo
-#   make install-go                    # or install into $GOBIN instead
+sudo make install          # → /usr/local/bin/codexmon  +  agent skill into ~/.claude/skills
+#   make install PREFIX=$HOME/.local   # install the binary elsewhere, no sudo
+#   make install-go                    # install the binary into $GOBIN instead
+#   make install-skill                 # install just the agent skill
 ```
+
+`make install` also drops the [agent skill](#using-codexmon-from-claude-code)
+into `~/.claude/skills/codexmon` (the invoking user's home, even under `sudo`).
 
 Confirm your environment is ready:
 
@@ -227,13 +231,14 @@ agent can branch on the outcome without parsing prose. To skip permission
 prompts, allow `Bash(codexmon:*)` in `.claude/settings.json`.
 
 **Drop-in agent skill.** [`skills/codexmon/SKILL.md`](skills/codexmon/SKILL.md)
-is a ready-made skill that teaches an agent the whole loop above. Install it for
-Claude Code by copying the folder into your skills directory:
+is a ready-made skill that teaches an agent the whole loop above. `make install`
+installs it automatically; to (re)install just the skill:
 
 ```sh
+make install-skill                             # → ~/.claude/skills/codexmon
+# or by hand:
 cp -r skills/codexmon ~/.claude/skills/        # user-wide
-# or project-local:
-cp -r skills/codexmon .claude/skills/
+cp -r skills/codexmon .claude/skills/          # project-local
 ```
 
 > **Tip:** if a review stalls on an MCP tool that's configured in

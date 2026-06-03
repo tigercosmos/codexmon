@@ -100,4 +100,3 @@ bounded by the wall timeout.
   design the child's stdin is `/dev/null` (this is what prevents the classic
   stdin hang). Pass prompts as arguments, or use `--stdin` to forward.
 - `status`/`wait`/`tail`/`cancel` with no id act on the most recent job.
-```
