@@ -58,3 +58,28 @@ jobs:
         with:
           version: latest
           install-go: false
+
+  release-check:
+    name: release build (snapshot)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+      # Validate .goreleaser.yaml and cross-compile every target on each push,
+      # so a release can never break only at tag time.
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: check
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: build --snapshot --clean
+      # Belt-and-suspenders: the goreleaser-free local path must also work.
+      - name: make dist
+        run: make dist
