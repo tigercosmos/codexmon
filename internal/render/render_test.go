@@ -14,8 +14,16 @@ func sampleRunning() *job.Status {
 		ID: "cdx-1", State: job.StateRunning, Health: job.HealthHealthy, Phase: "reviewing",
 		Title: "codex exec review", CodexPID: 123, WorkerPID: 100,
 		ElapsedSec: 47, IdleSec: 3, EventCount: 12, LastEvent: "ran: go test (exit 0)",
-		ThreadID: "thr-1", Thresholds: job.Thresholds{SlowAfterSec: 30, StalledSec: 180, WallSec: 600},
-		LogFile: "/tmp/x/output.log", StartedAt: time.Now(),
+		ThreadID:   "thr-1",
+		Thresholds: job.Thresholds{SlowAfterSec: 30, StalledSec: 180, ToolStuckSec: 120, WallSec: 600},
+		LogFile:    "/tmp/x/output.log", StartedAt: time.Now(),
+	}
+}
+
+func TestStatusShowsToolLimit(t *testing.T) {
+	out := Status(sampleRunning())
+	if !strings.Contains(out, "tool>2m00s") {
+		t.Errorf("status should show the tool limit\n%s", out)
 	}
 }
 

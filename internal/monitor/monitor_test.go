@@ -47,6 +47,21 @@ case "$1" in
         echo '{"type":"thread.started","thread_id":"t-fake"}'
         echo '{"type":"error","message":"model error happened"}'
         exit 0 ;;
+      slowtool)
+        echo '{"type":"thread.started","thread_id":"t-fake"}'
+        echo '{"type":"turn.started"}'
+        echo '{"type":"item.started","item":{"id":"t0","type":"mcp_tool_call","server":"s","tool":"slow","status":"in_progress"}}'
+        sleep "${FAKE_SLEEP:-2}"
+        echo '{"type":"item.completed","item":{"id":"t0","type":"mcp_tool_call","server":"s","tool":"slow","status":"completed"}}'
+        echo '{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"FAKE_RESULT_OK"}}'
+        echo '{"type":"turn.completed","usage":{"input_tokens":5,"cached_input_tokens":0,"output_tokens":2,"reasoning_output_tokens":1}}'
+        [ -n "$out" ] && printf 'FAKE_RESULT_OK' > "$out"
+        exit 0 ;;
+      hungtool)
+        echo '{"type":"thread.started","thread_id":"t-fake"}'
+        echo '{"type":"turn.started"}'
+        echo '{"type":"item.started","item":{"id":"t0","type":"mcp_tool_call","server":"s","tool":"hung","status":"in_progress"}}'
+        sleep 30 ;;
       grandchild)
         echo '{"type":"thread.started","thread_id":"t-fake"}'
         echo '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"FAKE_RESULT_OK"}}'
@@ -345,29 +360,39 @@ func TestMonitorStdinDoesNotHang(t *testing.T) {
 // ---- white-box unit tests --------------------------------------------------
 
 func TestClassifyHealth(t *testing.T) {
-	th := job.Thresholds{SlowAfterSec: 30, StalledSec: 180}
-	mk := func(events int, jsonMode bool) *job.Status {
-		return &job.Status{EventCount: events, JSONMode: jsonMode, Thresholds: th}
+	th := job.Thresholds{SlowAfterSec: 30, StalledSec: 180, ToolStuckSec: 120}
+	mk := func(events int) *job.Status {
+		return &job.Status{EventCount: events, JSONMode: true, Thresholds: th}
 	}
-	if got := classifyHealth(mk(0, true), 1, 0); got != job.HealthStarting {
-		t.Errorf("no events json = %s, want starting", got)
+	if got := classifyHealth(mk(0), liveness{idle: 1}); got != job.HealthStarting {
+		t.Errorf("no events, low idle = %s, want starting", got)
 	}
 	// No events but idle past slow → must escalate, not stay 'starting' forever.
-	if got := classifyHealth(mk(0, true), 45, 0); got != job.HealthSlow {
+	if got := classifyHealth(mk(0), liveness{idle: 45}); got != job.HealthSlow {
 		t.Errorf("no events but idle past slow = %s, want slow", got)
 	}
-	if got := classifyHealth(mk(3, true), 5, 0); got != job.HealthHealthy {
+	if got := classifyHealth(mk(3), liveness{idle: 5}); got != job.HealthHealthy {
 		t.Errorf("low idle = %s, want healthy", got)
 	}
-	if got := classifyHealth(mk(3, true), 45, 0); got != job.HealthSlow {
+	if got := classifyHealth(mk(3), liveness{idle: 45}); got != job.HealthSlow {
 		t.Errorf("medium idle = %s, want slow", got)
 	}
-	if got := classifyHealth(mk(3, true), 200, 0); got != job.HealthStalled {
+	if got := classifyHealth(mk(3), liveness{idle: 200}); got != job.HealthStalled {
 		t.Errorf("high idle = %s, want stalled", got)
 	}
 	// A command in flight is liveness: never 'stalled' even when very idle.
-	if got := classifyHealth(mk(3, true), 200, 1); got == job.HealthStalled {
-		t.Errorf("in-flight command should not be stalled, got %s", got)
+	if got := classifyHealth(mk(3), liveness{idle: 200, cmdInFlight: true}); got != job.HealthHealthy {
+		t.Errorf("in-flight command should be healthy, got %s", got)
+	}
+	// A tool call is judged against the tool timeout, not idle.
+	if got := classifyHealth(mk(3), liveness{idle: 200, toolInFlight: true, oldestTool: 10}); got != job.HealthHealthy {
+		t.Errorf("fresh tool call should be healthy, got %s", got)
+	}
+	if got := classifyHealth(mk(3), liveness{toolInFlight: true, oldestTool: 70}); got != job.HealthSlow {
+		t.Errorf("tool past half the limit should be slow, got %s", got)
+	}
+	if got := classifyHealth(mk(3), liveness{toolInFlight: true, oldestTool: 130}); got != job.HealthStalled {
+		t.Errorf("tool past the limit should be stalled, got %s", got)
 	}
 }
 
@@ -412,7 +437,51 @@ func TestKillMessage(t *testing.T) {
 
 func TestDefaultThresholds(t *testing.T) {
 	th := DefaultThresholds()
-	if th.WallSec != 600 || th.StalledSec != 180 || th.SlowAfterSec != 30 || th.HeartbeatSec != 10 {
+	if th.WallSec != 600 || th.StalledSec != 180 || th.SlowAfterSec != 30 || th.HeartbeatSec != 10 || th.ToolStuckSec != 120 {
 		t.Errorf("unexpected defaults: %+v", th)
+	}
+}
+
+func TestMonitorSlowToolNotKilled(t *testing.T) {
+	// A tool call that returns before the tool timeout must not be killed, even
+	// under an aggressive idle ceiling (the idle clock is irrelevant while a
+	// tool is in flight).
+	bin := writeFakeCodex(t)
+	t.Setenv("FAKE_MODE", "slowtool")
+	t.Setenv("FAKE_SLEEP", "2")
+	th := job.Thresholds{HeartbeatSec: 0, SlowAfterSec: 0, StalledSec: 1, ToolStuckSec: 10, WallSec: 0}
+	spec, dir, resultFile := newSpec(t, bin, true,
+		[]string{"exec", "--json", "--output-last-message", "", "prompt"}, th)
+	spec.Args[3] = resultFile
+
+	st, err := Run(dir, spec, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.State != job.StateCompleted {
+		t.Fatalf("slow-but-returning tool should complete, got %s (%s)", st.State, st.Error)
+	}
+}
+
+func TestMonitorHungToolKilledByToolTimeout(t *testing.T) {
+	// With the idle ceiling OFF, only the tool timeout should catch a hung tool.
+	bin := writeFakeCodex(t)
+	t.Setenv("FAKE_MODE", "hungtool")
+	th := job.Thresholds{HeartbeatSec: 0, SlowAfterSec: 0, StalledSec: 0, ToolStuckSec: 1, WallSec: 0}
+	spec, dir, _ := newSpec(t, bin, true, []string{"exec", "--json"}, th)
+
+	start := time.Now()
+	st, err := Run(dir, spec, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.State != job.StateStalled {
+		t.Fatalf("hung tool should be stalled, got %s", st.State)
+	}
+	if !strings.Contains(st.Error, "tool call") {
+		t.Errorf("error should name the stuck tool, got %q", st.Error)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("tool timeout took too long: %s", time.Since(start))
 	}
 }

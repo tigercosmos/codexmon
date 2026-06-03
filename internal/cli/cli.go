@@ -44,7 +44,8 @@ USAGE
 MONITOR FLAGS (run/start)
   -b, --background           Detach and return a job id immediately
       --wall-timeout S       Hard wall-clock limit in seconds (0=off, default 600)
-      --idle-timeout S       Kill after S seconds with no activity (0=off, default 180)
+      --idle-timeout S       Kill after S idle seconds when nothing is in flight (0=off, default 180)
+      --tool-timeout S       Kill if one MCP/tool call runs longer than S seconds (0=off, default 120)
       --slow-after S         Mark "slow" after S idle seconds (default 30)
       --heartbeat S          Heartbeat cadence in seconds (default 10)
   -C, --cwd DIR              Working directory for codex
@@ -157,6 +158,10 @@ func parseRunArgs(args []string) (runConfig, []string, error) {
 			}
 		case name == "--idle-timeout" || name == "--stall":
 			if err := setSec(&cfg.thresholds.StalledSec, val, name, attached); err != nil {
+				return cfg, nil, err
+			}
+		case name == "--tool-timeout":
+			if err := setSec(&cfg.thresholds.ToolStuckSec, val, name, attached); err != nil {
 				return cfg, nil, err
 			}
 		case name == "--slow-after":

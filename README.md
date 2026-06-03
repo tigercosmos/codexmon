@@ -86,7 +86,8 @@ to reliably capture the final answer. Use `--no-json` to disable.
 |------|---------|---------|
 | `-b, --background` | off | Detach and return a job id immediately |
 | `--wall-timeout S` | 600 | Hard wall-clock limit, seconds (`0` = off) |
-| `--idle-timeout S` | 180 | Kill after S seconds with **no activity** (`0` = off) |
+| `--idle-timeout S` | 180 | Kill after S idle seconds **when nothing is in flight** (`0` = off) |
+| `--tool-timeout S` | 120 | Kill if a single MCP/tool call runs longer than S seconds (`0` = off) |
 | `--slow-after S` | 30 | Flag health as `slow` after S idle seconds |
 | `--heartbeat S` | 10 | Heartbeat cadence, seconds |
 | `-C, --cwd DIR` | cwd | Working directory for codex |
@@ -95,18 +96,27 @@ to reliably capture the final answer. Use `--no-json` to disable.
 | `--codex-bin PATH` | `codex` | Path to the codex binary |
 | `--json` | off | Emit machine-readable JSON instead of human text |
 
-Idle time is **reported but not fatal** until the `--idle-timeout` ceiling —
-long reasoning is normal during a review. Codex is only force-stopped at the
-idle ceiling or the wall-clock timeout.
+The watchdog applies the right rule to **what Codex is actually doing**, so a
+slow-but-working step isn't mistaken for a hang:
+
+- **An MCP/tool call in flight** is judged against `--tool-timeout` (tool calls
+  should be quick; a stuck one is caught precisely and faster than the idle
+  ceiling). A slow-but-returning tool is not killed.
+- **A shell command in flight** (e.g. `go test`) is exempt from idle/stall — it
+  may legitimately run for minutes; only `--wall-timeout` bounds it.
+- **Nothing in flight** (quiet model reasoning) is governed by `--idle-timeout`.
+- `--wall-timeout` is the absolute backstop in every case.
+
+Set `--tool-timeout 0` to instead let a slow MCP tool run until the wall timeout.
 
 ### Health model
 
 | Health | Meaning |
 |--------|---------|
 | `starting` | launched, no events yet |
-| `healthy` ✅ | producing events / output recently |
-| `slow` ⚠️ | idle past `--slow-after`, still alive |
-| `stalled` ❌ | idle past `--idle-timeout`; will be terminated |
+| `healthy` ✅ | producing events, or a command/tool actively in flight within budget |
+| `slow` ⚠️ | idle past `--slow-after`, or a tool call past half `--tool-timeout` |
+| `stalled` ❌ | idle past `--idle-timeout`, or a tool call past `--tool-timeout`; will be terminated |
 | `done` ✅ / `dead` ❌ | terminal: completed, or failed/stalled/timeout/cancelled |
 
 ### Exit codes

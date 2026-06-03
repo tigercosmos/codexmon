@@ -48,8 +48,9 @@ func Status(s *job.Status) string {
 		fmt.Fprintf(&b, "  tokens:   %d in / %d out (%d cached, %d reasoning)\n",
 			s.Usage.InputTokens, s.Usage.OutputTokens, s.Usage.CachedInputTokens, s.Usage.ReasoningOutputTokens)
 	}
-	fmt.Fprintf(&b, "  limits:   slow>%s stall>%s wall>%s\n",
-		durOff(s.Thresholds.SlowAfterSec), durOff(s.Thresholds.StalledSec), durOff(s.Thresholds.WallSec))
+	fmt.Fprintf(&b, "  limits:   slow>%s stall>%s tool>%s wall>%s\n",
+		durOff(s.Thresholds.SlowAfterSec), durOff(s.Thresholds.StalledSec),
+		durOff(s.Thresholds.ToolStuckSec), durOff(s.Thresholds.WallSec))
 	if s.ExitCode != nil {
 		fmt.Fprintf(&b, "  exit:     %d\n", *s.ExitCode)
 	}

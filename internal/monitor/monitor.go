@@ -38,6 +38,7 @@ func DefaultThresholds() job.Thresholds {
 		HeartbeatSec: 10,
 		SlowAfterSec: 30,
 		StalledSec:   180,
+		ToolStuckSec: 120,
 		WallSec:      600,
 	}
 }
@@ -67,17 +68,35 @@ type runner struct {
 	lastActivity time.Time
 	start        time.Time
 
-	resultText      string          // most recent agent_message (final answer)
-	resultBuf       strings.Builder // accumulated stdout for non-JSON mode
-	stderrTail      []string        // last few meaningful stderr lines
-	inFlightCmds    map[string]bool // command_execution items started but not completed
-	sawFailureEvent bool            // an error / turn.failed event was observed
+	resultText      string                  // most recent agent_message (final answer)
+	resultBuf       strings.Builder         // accumulated stdout for non-JSON mode
+	stderrTail      []string                // last few meaningful stderr lines
+	inFlight        map[string]inflightItem // items started but not completed
+	sawFailureEvent bool                    // an error / turn.failed event was observed
 
 	// killState is set by the watchdog when it forcibly stops codex, so the
 	// finalizer reports the right terminal state instead of a raw exit code.
 	killState job.State
 	finalized bool
 }
+
+// inflightItem is an item codex started but has not completed. We classify it so
+// the watchdog can apply the right liveness rule: a shell command may run long
+// (wall-timeout only), an MCP/tool call gets a dedicated stuck-timeout, and a
+// fully-quiet codex (nothing in flight) is governed by the idle ceiling.
+type inflightItem struct {
+	kind    itemKind
+	started time.Time
+	label   string
+}
+
+type itemKind int
+
+const (
+	kindOther itemKind = iota
+	kindCommand
+	kindTool
+)
 
 const stderrTailMax = 12
 
@@ -93,7 +112,7 @@ func Run(dir string, spec *job.Spec, opts Options) (*job.Status, error) {
 		opts:         opts,
 		start:        now,
 		lastActivity: now,
-		inFlightCmds: map[string]bool{},
+		inFlight:     map[string]inflightItem{},
 		st: &job.Status{
 			ID:         spec.ID,
 			State:      job.StateRunning,
@@ -283,12 +302,14 @@ func (r *runner) applyEvent(ev events.Event) {
 	if ev.Usage != nil {
 		r.st.Usage = ev.Usage
 	}
-	if ev.Item != nil && ev.Item.Type == "command_execution" {
+	if ev.Item != nil && ev.Item.ID != "" {
 		switch ev.Type {
 		case "item.started":
-			r.inFlightCmds[ev.Item.ID] = true
-		case "item.completed":
-			delete(r.inFlightCmds, ev.Item.ID)
+			if kind := classifyItem(ev.Item.Type); kind != kindOther {
+				r.inFlight[ev.Item.ID] = inflightItem{kind: kind, started: now, label: itemLabel(ev.Item)}
+			}
+		case "item.completed", "item.failed":
+			delete(r.inFlight, ev.Item.ID)
 		}
 	}
 	if ev.Item != nil && ev.Item.Type == "agent_message" && ev.Type == "item.completed" && ev.Item.Text != "" {
@@ -309,6 +330,34 @@ func (r *runner) applyEvent(ev events.Event) {
 	r.mu.Unlock()
 	if summary != "" {
 		r.emit(summary)
+	}
+}
+
+// classifyItem buckets an item type for the watchdog's liveness rules.
+func classifyItem(itemType string) itemKind {
+	switch itemType {
+	case "command_execution":
+		return kindCommand
+	case "mcp_tool_call", "dynamic_tool_call", "web_search":
+		return kindTool
+	default:
+		return kindOther
+	}
+}
+
+// itemLabel is a short human label for an in-flight item, used in kill reasons.
+func itemLabel(it *events.Item) string {
+	switch it.Type {
+	case "command_execution":
+		return preview(it.Command, 60)
+	case "mcp_tool_call":
+		return it.Server + "/" + it.Tool
+	case "dynamic_tool_call":
+		return it.Tool
+	case "web_search":
+		return preview(it.Query, 60)
+	default:
+		return it.Type
 	}
 }
 
@@ -376,14 +425,12 @@ func (r *runner) watchdog(cmd *exec.Cmd, procExited <-chan struct{}, stop <-chan
 
 		now := time.Now()
 		r.mu.Lock()
-		elapsed := now.Sub(r.start).Seconds()
-		idle := now.Sub(r.lastActivity).Seconds()
-		inFlight := len(r.inFlightCmds)
-		r.st.ElapsedSec = round1(elapsed)
-		r.st.IdleSec = round1(idle)
+		lv := r.livenessLocked(now)
+		r.st.ElapsedSec = round1(lv.elapsed)
+		r.st.IdleSec = round1(lv.idle)
 		r.st.UpdatedAt = now
-		r.st.Health = classifyHealth(r.st, idle, inFlight)
-		killState, killReason := r.decideKill(idle, elapsed, inFlight)
+		r.st.Health = classifyHealth(r.st, lv)
+		killState, killReason := r.decideKill(lv)
 		r.persistLocked()
 		stderrTail := append([]string(nil), r.stderrTail...)
 		r.mu.Unlock()
@@ -399,6 +446,9 @@ func (r *runner) watchdog(cmd *exec.Cmd, procExited <-chan struct{}, stop <-chan
 			}
 			r.mu.Lock()
 			r.killState = killState
+			if r.st.Error == "" {
+				r.st.Error = killReason // precise reason (names the stuck tool, idle, etc.)
+			}
 			r.mu.Unlock()
 			r.emit("terminating codex: " + killReason)
 			proc.TerminateGroup(cmd.Process.Pid, 3*time.Second)
@@ -407,63 +457,120 @@ func (r *runner) watchdog(cmd *exec.Cmd, procExited <-chan struct{}, stop <-chan
 
 		if hb > 0 && (lastBeat.IsZero() || now.Sub(lastBeat).Seconds() >= hb) {
 			lastBeat = now
-			r.emit(r.heartbeatLine(elapsed, idle, stderrTail))
+			r.emit(r.heartbeatLine(lv, stderrTail))
 		}
 	}
 }
 
-// decideKill checks cancel/stall/timeout and returns the candidate terminal
-// state and reason, WITHOUT committing it — the watchdog commits only after a
-// final exit check, so a natural exit always wins the race. The stall check is
-// suppressed while a command is in flight (codex emits no events during a long
-// shell command, but it is working, not hung — the wall-clock timeout still
-// backstops that case). Caller holds r.mu.
-func (r *runner) decideKill(idle, elapsed float64, inFlight int) (state job.State, reason string) {
+// liveness is a snapshot of how codex is occupied, used to apply the right
+// watchdog rule per regime.
+type liveness struct {
+	idle, elapsed float64
+	toolInFlight  bool
+	cmdInFlight   bool
+	oldestTool    float64 // seconds the longest-running in-flight tool call has run
+	toolLabel     string  // label of that tool call
+}
+
+// livenessLocked computes the current liveness snapshot. Caller holds r.mu.
+func (r *runner) livenessLocked(now time.Time) liveness {
+	lv := liveness{
+		idle:    now.Sub(r.lastActivity).Seconds(),
+		elapsed: now.Sub(r.start).Seconds(),
+	}
+	for _, it := range r.inFlight {
+		switch it.kind {
+		case kindCommand:
+			lv.cmdInFlight = true
+		case kindTool:
+			lv.toolInFlight = true
+			if age := now.Sub(it.started).Seconds(); age > lv.oldestTool {
+				lv.oldestTool = age
+				lv.toolLabel = it.label
+			}
+		}
+	}
+	return lv
+}
+
+// decideKill checks cancel/tool-stuck/idle/wall and returns the candidate
+// terminal state and reason, WITHOUT committing it — the watchdog commits only
+// after a final exit check, so a natural exit always wins the race.
+//
+// The rule depends on what codex is doing:
+//   - a single MCP/tool call held open too long → stalled (catches a hung tool
+//     precisely, faster than the idle ceiling);
+//   - a shell command in flight → no idle/stall kill (it may legitimately run
+//     long); only the wall-clock timeout applies;
+//   - nothing in flight (quiet model phase) → the idle ceiling applies.
+//
+// Caller holds r.mu.
+func (r *runner) decideKill(lv liveness) (state job.State, reason string) {
+	th := r.spec.Thresholds
 	if job.CancelRequested(r.dir) {
 		return job.StateCancelled, "cancel requested"
 	}
-	if t := r.spec.Thresholds.StalledSec; t > 0 && inFlight == 0 && idle >= t {
-		return job.StateStalled, "no activity for " + itoa(int(idle)) + "s (stall ceiling " + itoa(int(t)) + "s)"
+	if t := th.ToolStuckSec; t > 0 && lv.oldestTool >= t {
+		label := lv.toolLabel
+		if label == "" {
+			label = "tool call"
+		}
+		return job.StateStalled, "tool call " + label + " stuck for " + itoa(int(lv.oldestTool)) + "s (tool timeout " + itoa(int(t)) + "s)"
 	}
-	if t := r.spec.Thresholds.WallSec; t > 0 && elapsed >= t {
-		return job.StateTimeout, "wall-clock timeout after " + itoa(int(elapsed)) + "s (limit " + itoa(int(t)) + "s)"
+	if t := th.StalledSec; t > 0 && !lv.cmdInFlight && !lv.toolInFlight && lv.idle >= t {
+		return job.StateStalled, "no activity for " + itoa(int(lv.idle)) + "s (stall ceiling " + itoa(int(t)) + "s)"
+	}
+	if t := th.WallSec; t > 0 && lv.elapsed >= t {
+		return job.StateTimeout, "wall-clock timeout after " + itoa(int(lv.elapsed)) + "s (limit " + itoa(int(t)) + "s)"
 	}
 	return "", ""
 }
 
-func classifyHealth(st *job.Status, idle float64, inFlight int) job.Health {
+func classifyHealth(st *job.Status, lv liveness) job.Health {
 	slow := st.Thresholds.SlowAfterSec
 	stalled := st.Thresholds.StalledSec
+	toolLimit := st.Thresholds.ToolStuckSec
 	// Genuinely early (no events yet) only counts as "starting" until it has
 	// been idle long enough to be worth flagging; after that it must escalate.
-	if st.EventCount == 0 && st.JSONMode && (slow <= 0 || idle < slow) {
+	if st.EventCount == 0 && st.JSONMode && (slow <= 0 || lv.idle < slow) {
 		return job.HealthStarting
 	}
-	// A command in flight means codex is actively working even while quiet.
-	if inFlight > 0 {
-		if slow > 0 && idle >= slow {
+	// A tool call in flight is judged against the tool timeout, not the idle clock.
+	if lv.toolInFlight {
+		switch {
+		case toolLimit > 0 && lv.oldestTool >= toolLimit:
+			return job.HealthStalled
+		case toolLimit > 0 && lv.oldestTool >= toolLimit/2:
 			return job.HealthSlow
+		default:
+			return job.HealthHealthy
 		}
+	}
+	// A shell command in flight means codex is actively working even while quiet.
+	if lv.cmdInFlight {
 		return job.HealthHealthy
 	}
 	switch {
-	case stalled > 0 && idle >= stalled:
+	case stalled > 0 && lv.idle >= stalled:
 		return job.HealthStalled
-	case slow > 0 && idle >= slow:
+	case slow > 0 && lv.idle >= slow:
 		return job.HealthSlow
 	default:
 		return job.HealthHealthy
 	}
 }
 
-func (r *runner) heartbeatLine(elapsed, idle float64, stderrTail []string) string {
+func (r *runner) heartbeatLine(lv liveness, stderrTail []string) string {
 	r.mu.Lock()
 	phase := r.st.Phase
 	health := r.st.Health
 	last := r.st.LastEvent
 	r.mu.Unlock()
 	line := "♥ " + string(health) + " phase=" + phase +
-		" elapsed=" + itoa(int(elapsed)) + "s idle=" + itoa(int(idle)) + "s"
+		" elapsed=" + itoa(int(lv.elapsed)) + "s idle=" + itoa(int(lv.idle)) + "s"
+	if lv.toolInFlight {
+		line += " tool=\"" + lv.toolLabel + "\" tool_age=" + itoa(int(lv.oldestTool)) + "s"
+	}
 	if last != "" {
 		line += " last=\"" + last + "\""
 	}

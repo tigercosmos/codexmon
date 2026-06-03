@@ -58,11 +58,12 @@ const (
 	HealthDead     Health = "dead"
 )
 
-// Thresholds are the watchdog limits. A zero duration disables that check.
+// Thresholds are the watchdog limits, in seconds. A zero value disables that check.
 type Thresholds struct {
 	HeartbeatSec float64 `json:"heartbeat_sec"`
 	SlowAfterSec float64 `json:"slow_after_sec"`
-	StalledSec   float64 `json:"stalled_sec"`
+	StalledSec   float64 `json:"stalled_sec"`    // idle ceiling when nothing is in flight
+	ToolStuckSec float64 `json:"tool_stuck_sec"` // max time a single MCP/tool call may run
 	WallSec      float64 `json:"wall_sec"`
 }
 
