@@ -61,12 +61,19 @@ func runCapture(timeout time.Duration, name string, args ...string) (string, err
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 	proc.SetChildGroup(cmd)
+	// On timeout, kill the whole process group (not just the leader). WaitDelay
+	// bounds how long Run will block draining pipes a lingering grandchild holds
+	// open after the process exits — so doctor/version can never hang past the
+	// deadline, the very failure codexmon exists to surface.
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			proc.KillGroupNow(cmd.Process.Pid)
+		}
+		return nil
+	}
+	cmd.WaitDelay = 2 * time.Second
 	err := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
-		// Make sure no descendants linger.
-		if cmd.Process != nil {
-			killGroup(cmd.Process.Pid)
-		}
 		return buf.String(), context.DeadlineExceeded
 	}
 	return buf.String(), err

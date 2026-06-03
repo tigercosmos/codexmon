@@ -90,6 +90,12 @@ func TestParseWaitArgsJSONRejectsValue(t *testing.T) {
 	}
 }
 
+func TestParseWaitArgsNegativeTimeout(t *testing.T) {
+	if _, _, _, _, err := parseWaitArgs([]string{"--timeout", "-5"}); err == nil {
+		t.Error("negative --timeout should be rejected")
+	}
+}
+
 func TestSplitFlag(t *testing.T) {
 	n, v := splitFlag("--wall-timeout=90")
 	if n != "--wall-timeout" || v != "90" {

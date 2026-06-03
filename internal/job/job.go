@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -145,21 +146,39 @@ func jobsRoot() (string, error) {
 	return filepath.Join(h, "jobs"), nil
 }
 
-// NewID returns a sortable, unique job id like "cdx-20260603-9f3a1c".
+// idPattern is the canonical job id shape; it also gates ids that reach the
+// filesystem so a caller-supplied id can never traverse outside the jobs root.
+var idPattern = regexp.MustCompile(`^cdx-[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$`)
+
+// NewID returns a sortable, unique job id like "cdx-20260603-150405-9f3a1c".
 func NewID() string {
 	var b [3]byte
-	_, _ = rand.Read(b[:])
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand should never fail here, but never emit a predictable or
+		// colliding suffix if it does — mix in the nanosecond clock.
+		n := time.Now().UnixNano()
+		b[0], b[1], b[2] = byte(n), byte(n>>8), byte(n>>16)
+	}
 	return fmt.Sprintf("cdx-%s-%s", time.Now().Format("20060102-150405"), hex.EncodeToString(b[:]))
 }
 
-// Dir returns (and creates) the directory for a job id.
+// ValidID reports whether id is a well-formed, traversal-safe job id.
+func ValidID(id string) bool {
+	return idPattern.MatchString(id)
+}
+
+// Dir returns (and creates) the directory for a job id. Directories are 0700:
+// codex prompts, output, and review text may contain secrets.
 func Dir(id string) (string, error) {
+	if !ValidID(id) {
+		return "", fmt.Errorf("invalid job id %q", id)
+	}
 	root, err := jobsRoot()
 	if err != nil {
 		return "", err
 	}
 	dir := filepath.Join(root, id)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
 	return dir, nil
@@ -248,20 +267,33 @@ func ReadStatus(dir string) (*Status, error) {
 	return &s, nil
 }
 
-// reconcileLiveness downgrades an active status whose worker has died without
-// recording a terminal state. The worker is the sole writer of status.json, so
-// if it is gone the status can never change again.
+// workerStaleLimit is how long status.json may go un-updated before an active
+// job is treated as dead. The monitor rewrites status every watchdog tick (~1s),
+// so a gap this large means the writer is gone or wedged.
+const workerStaleLimit = 15 * time.Second
+
+// reconcileLiveness downgrades an active status whose worker can no longer be
+// updating it. The worker is the sole writer of status.json, so if it is gone —
+// or its pid was reused and the file has gone stale — the status can never
+// change again and must not be reported as still running.
 func reconcileLiveness(s *Status) {
 	if s == nil || !s.State.Active() || s.WorkerPID <= 0 {
 		return
 	}
-	if proc.Alive(s.WorkerPID) {
+	alive := proc.Alive(s.WorkerPID)
+	stale := !s.UpdatedAt.IsZero() && time.Since(s.UpdatedAt) > workerStaleLimit
+	if alive && !stale {
 		return
 	}
 	s.State = StateFailed
 	s.Health = HealthDead
 	if s.Error == "" {
-		s.Error = fmt.Sprintf("worker process %d is no longer running; the job ended without recording a result", s.WorkerPID)
+		if !alive {
+			s.Error = fmt.Sprintf("worker process %d is no longer running; the job ended without recording a result", s.WorkerPID)
+		} else {
+			s.Error = fmt.Sprintf("status has not updated in %s; the worker appears wedged (or pid %d was reused)",
+				time.Since(s.UpdatedAt).Round(time.Second), s.WorkerPID)
+		}
 	}
 	if s.EndedAt == nil {
 		now := time.Now()
@@ -271,6 +303,9 @@ func reconcileLiveness(s *Status) {
 
 // ReadStatusByID resolves a job id to its status.
 func ReadStatusByID(id string) (*Status, error) {
+	if !ValidID(id) {
+		return nil, fmt.Errorf("invalid job id %q", id)
+	}
 	root, err := jobsRoot()
 	if err != nil {
 		return nil, err
@@ -346,7 +381,7 @@ func Resolve(id string) (*Status, error) {
 // RequestCancel writes the cancel marker the monitor polls for.
 func RequestCancel(dir string) error {
 	_, _, _, _, _, cancel := Paths(dir)
-	return os.WriteFile(cancel, []byte(time.Now().Format(time.RFC3339Nano)), 0o644)
+	return os.WriteFile(cancel, []byte(time.Now().Format(time.RFC3339Nano)), 0o600)
 }
 
 // CancelRequested reports whether the cancel marker exists.

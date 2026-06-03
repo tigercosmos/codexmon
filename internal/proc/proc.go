@@ -44,6 +44,15 @@ func Alive(pid int) bool {
 	return syscall.Kill(pid, 0) == nil
 }
 
+// KillGroupNow sends an immediate SIGKILL to the whole process group led by
+// pid. Use for timeout cancellation where a graceful SIGTERM grace is not worth
+// waiting for.
+func KillGroupNow(pid int) {
+	if pid > 0 {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+	}
+}
+
 // groupAlive reports whether any process remains in the group led by pid.
 // kill(-pgid, 0) succeeds while the group has at least one member and returns
 // ESRCH once it is empty — unlike probing the leader pid, which can be gone

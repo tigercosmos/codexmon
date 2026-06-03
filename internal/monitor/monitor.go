@@ -118,7 +118,8 @@ func Run(dir string, spec *job.Spec, opts Options) (*job.Status, error) {
 	}
 	_ = job.WriteStatus(dir, r.st)
 
-	logF, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	// 0600: codex output, prompts, command args, and review text may be sensitive.
+	logF, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return r.fail("open log file: " + err.Error()), err
 	}
@@ -126,7 +127,7 @@ func Run(dir string, spec *job.Spec, opts Options) (*job.Status, error) {
 	r.logF = logF
 
 	if spec.JSONMode {
-		evF, err := os.OpenFile(eventsFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		evF, err := os.OpenFile(eventsFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			return r.fail("open events file: " + err.Error()), err
 		}
@@ -382,12 +383,23 @@ func (r *runner) watchdog(cmd *exec.Cmd, procExited <-chan struct{}, stop <-chan
 		r.st.IdleSec = round1(idle)
 		r.st.UpdatedAt = now
 		r.st.Health = classifyHealth(r.st, idle, inFlight)
-		killReason := r.decideKillLocked(idle, elapsed, inFlight)
+		killState, killReason := r.decideKill(idle, elapsed, inFlight)
 		r.persistLocked()
 		stderrTail := append([]string(nil), r.stderrTail...)
 		r.mu.Unlock()
 
 		if killReason != "" {
+			// Final exit check immediately before committing the kill: if codex
+			// finished in this window it completed naturally, so don't record a
+			// kill verdict that finalize would (rightly) honor and mislabel.
+			select {
+			case <-procExited:
+				return
+			default:
+			}
+			r.mu.Lock()
+			r.killState = killState
+			r.mu.Unlock()
 			r.emit("terminating codex: " + killReason)
 			proc.TerminateGroup(cmd.Process.Pid, 3*time.Second)
 			return
@@ -400,24 +412,23 @@ func (r *runner) watchdog(cmd *exec.Cmd, procExited <-chan struct{}, stop <-chan
 	}
 }
 
-// decideKillLocked checks cancel/stall/timeout and, if firing, records the
-// terminal kill-state. The stall check is suppressed while a command is in
-// flight (codex emits no events during a long shell command, but it is working,
-// not hung — the wall-clock timeout still backstops that case). Caller holds r.mu.
-func (r *runner) decideKillLocked(idle, elapsed float64, inFlight int) (reason string) {
+// decideKill checks cancel/stall/timeout and returns the candidate terminal
+// state and reason, WITHOUT committing it — the watchdog commits only after a
+// final exit check, so a natural exit always wins the race. The stall check is
+// suppressed while a command is in flight (codex emits no events during a long
+// shell command, but it is working, not hung — the wall-clock timeout still
+// backstops that case). Caller holds r.mu.
+func (r *runner) decideKill(idle, elapsed float64, inFlight int) (state job.State, reason string) {
 	if job.CancelRequested(r.dir) {
-		r.killState = job.StateCancelled
-		return "cancel requested"
+		return job.StateCancelled, "cancel requested"
 	}
 	if t := r.spec.Thresholds.StalledSec; t > 0 && inFlight == 0 && idle >= t {
-		r.killState = job.StateStalled
-		return "no activity for " + itoa(int(idle)) + "s (stall ceiling " + itoa(int(t)) + "s)"
+		return job.StateStalled, "no activity for " + itoa(int(idle)) + "s (stall ceiling " + itoa(int(t)) + "s)"
 	}
 	if t := r.spec.Thresholds.WallSec; t > 0 && elapsed >= t {
-		r.killState = job.StateTimeout
-		return "wall-clock timeout after " + itoa(int(elapsed)) + "s (limit " + itoa(int(t)) + "s)"
+		return job.StateTimeout, "wall-clock timeout after " + itoa(int(elapsed)) + "s (limit " + itoa(int(t)) + "s)"
 	}
-	return ""
+	return "", ""
 }
 
 func classifyHealth(st *job.Status, idle float64, inFlight int) job.Health {
@@ -509,7 +520,7 @@ func (r *runner) finalize(cmd *exec.Cmd, waitErr error, resultFile string) *job.
 
 	result := r.captureResultLocked(resultFile)
 	if result != "" {
-		_ = os.WriteFile(resultFile, []byte(result), 0o644)
+		_ = os.WriteFile(resultFile, []byte(result), 0o600)
 		r.st.ResultPreview = preview(result, 600)
 	}
 

@@ -127,10 +127,13 @@ func Analyze(args []string, resultFile string, allowJSON bool) Analysis {
 	jsonMode := false
 	if isExec && allowJSON {
 		var inject []string
-		if !hasFlag(args, "--json") {
+		// Scope the "already present?" check to the exec option region so a
+		// prompt or flag value that merely equals "--json"/"-o" can't suppress
+		// real injection (which would leave JSONMode on but no JSON stream).
+		if !execOptionsHaveFlag(args, subIdx, "--json") {
 			inject = append(inject, "--json")
 		}
-		if resultFile != "" && !hasFlag(args, "-o", "--output-last-message") {
+		if resultFile != "" && !execOptionsHaveFlag(args, subIdx, "-o", "--output-last-message") {
 			inject = append(inject, "--output-last-message", resultFile)
 		}
 		if len(inject) > 0 {
@@ -142,6 +145,41 @@ func Analyze(args []string, resultFile string, allowJSON bool) Analysis {
 	}
 
 	return Analysis{IsExec: isExec, JSONMode: jsonMode, Args: out, Title: title}
+}
+
+// execOptionsHaveFlag reports whether any of names appears as a real flag in the
+// exec option region (after the exec token). It skips flag values and stops at a
+// free-text prompt, so prompt words and option values are never mistaken for
+// flags. Exec sub-subcommands (review/resume) are stepped over so their flags
+// are still considered.
+func execOptionsHaveFlag(args []string, subIdx int, names ...string) bool {
+	want := make(map[string]bool, len(names))
+	for _, n := range names {
+		want[n] = true
+	}
+	for i := subIdx + 1; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			return false // everything after -- is positional
+		}
+		if !strings.HasPrefix(a, "-") || a == "-" {
+			if isExecSubcommand(a) {
+				continue // a sub-subcommand; its flags follow
+			}
+			return false // reached the free-text prompt
+		}
+		name := a
+		if eq := strings.IndexByte(a, '='); eq > 0 {
+			name = a[:eq]
+		}
+		if want[name] {
+			return true
+		}
+		if !strings.Contains(a, "=") && flagsTakingValue[name] {
+			i++ // skip this flag's value
+		}
+	}
+	return false
 }
 
 // isExecToken reports whether tok is the codex `exec` subcommand or its alias `e`.

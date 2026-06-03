@@ -305,7 +305,11 @@ func launchBackground(spec *job.Spec, dir string, jsonOut bool) int {
 		Thresholds: spec.Thresholds, Dir: dir, LogFile: logFile,
 		ResultFile: resultFile, Title: spec.Title,
 	}
-	_ = job.WriteStatus(dir, seed)
+	// The status file is the whole contract for "the job started"; if we can't
+	// even write the seed, fail loudly instead of launching an unobservable job.
+	if err := job.WriteStatus(dir, seed); err != nil {
+		return fail(fmt.Errorf("write initial status: %w", err))
+	}
 
 	self, err := os.Executable()
 	if err != nil {
@@ -399,6 +403,7 @@ func cmdWait(args []string) int {
 	if timeout > 0 {
 		deadline = time.Now().Add(time.Duration(timeout * float64(time.Second)))
 	}
+	readErrs := 0
 	for st.State.Active() {
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			if !jsonOut {
@@ -413,11 +418,18 @@ func cmdWait(args []string) int {
 		}
 		time.Sleep(time.Duration(interval * float64(time.Second)))
 		// ReadStatus reconciles a dead worker to a terminal state, so this loop
-		// also ends if the worker crashes without recording a result.
+		// also ends if the worker crashes without recording a result. If the
+		// status file becomes persistently unreadable, don't spin forever.
 		next, err := job.ReadStatus(dir)
-		if err == nil {
-			st = next
+		if err != nil {
+			readErrs++
+			if readErrs >= 5 {
+				return fail(fmt.Errorf("cannot read status for %s after %d attempts: %w", st.ID, readErrs, err))
+			}
+			continue
 		}
+		readErrs = 0
+		st = next
 	}
 
 	if jsonOut {
@@ -454,8 +466,8 @@ func parseWaitArgs(args []string) (id string, timeout, interval float64, jsonOut
 				return "", 0, 0, false, e
 			}
 			timeout, err = strconv.ParseFloat(v, 64)
-			if err != nil {
-				return "", 0, 0, false, fmt.Errorf("--timeout: %w", err)
+			if err != nil || timeout < 0 {
+				return "", 0, 0, false, fmt.Errorf("--timeout needs a non-negative number of seconds, got %q", v)
 			}
 		case name == "--interval":
 			v, e := readVal()
@@ -522,7 +534,10 @@ func tailLog(st *job.Status, n int, follow bool) int {
 	}
 	defer f.Close()
 
-	data, _ := io.ReadAll(f)
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return fail(fmt.Errorf("read log: %w", err))
+	}
 	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 	if len(data) == 0 {
 		lines = nil
@@ -538,7 +553,7 @@ func tailLog(st *job.Status, n int, follow bool) int {
 		return 0
 	}
 
-	offset, _ := f.Seek(0, io.SeekCurrent)
+	offset := int64(len(data))
 	for {
 		cur, err := job.ReadStatus(st.Dir)
 		if err == nil {
@@ -546,13 +561,19 @@ func tailLog(st *job.Status, n int, follow bool) int {
 		}
 		buf := make([]byte, 64*1024)
 		for {
-			f.Seek(offset, io.SeekStart)
-			nr, _ := f.Read(buf)
-			if nr == 0 {
+			if _, err := f.Seek(offset, io.SeekStart); err != nil {
+				return fail(fmt.Errorf("seek log: %w", err))
+			}
+			nr, rerr := f.Read(buf)
+			if nr > 0 {
+				if _, werr := os.Stdout.Write(buf[:nr]); werr != nil {
+					return fail(fmt.Errorf("write: %w", werr))
+				}
+				offset += int64(nr)
+			}
+			if nr == 0 || rerr != nil {
 				break
 			}
-			os.Stdout.Write(buf[:nr])
-			offset += int64(nr)
 		}
 		if !st.State.Active() {
 			return exitCodeFor(st)

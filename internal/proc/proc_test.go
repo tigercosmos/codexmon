@@ -83,6 +83,26 @@ func TestTerminateGroupEscalatesToSurvivingDescendant(t *testing.T) {
 	t.Fatalf("surviving descendant %d ignored SIGTERM and was not SIGKILLed", childPID)
 }
 
+func TestGroupAlive(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix-only")
+	}
+	cmd := exec.Command("sleep", "30")
+	SetChildGroup(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	if !groupAlive(pid) {
+		t.Error("group should be alive while the child runs")
+	}
+	TerminateGroup(pid, time.Second)
+	_ = cmd.Wait()
+	if groupAlive(pid) {
+		t.Error("group should be gone after TerminateGroup")
+	}
+}
+
 func TestSetDetachedSetsSid(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix-only")

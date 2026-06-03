@@ -112,6 +112,18 @@ func TestAnalyzeApprovalFlagStillDetectsExec(t *testing.T) {
 	}
 }
 
+func TestAnalyzePromptTokenDoesNotSuppressInjection(t *testing.T) {
+	// A standalone "--json" token belonging to the prompt must NOT stop codexmon
+	// from injecting its own --json (which would leave JSONMode on with no stream).
+	a := Analyze([]string{"exec", "explain", "--json"}, "/tmp/r", true)
+	if a.Args[0] != "exec" || a.Args[1] != "--json" {
+		t.Errorf("--json should still be injected after exec: %v", a.Args)
+	}
+	if !a.JSONMode {
+		t.Error("JSONMode should be true")
+	}
+}
+
 func TestAnalyzeExecAlias(t *testing.T) {
 	a := Analyze([]string{"e", "review", "--uncommitted"}, "/tmp/r", true)
 	if !a.IsExec || !a.JSONMode {

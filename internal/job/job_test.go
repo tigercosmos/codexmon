@@ -187,6 +187,45 @@ func TestReconcileSkipsWhenNoWorkerPID(t *testing.T) {
 	}
 }
 
+func TestValidID(t *testing.T) {
+	if !ValidID("cdx-20260603-150405-9f3a1c") {
+		t.Error("canonical id should be valid")
+	}
+	if !ValidID(NewID()) {
+		t.Error("generated id should be valid")
+	}
+	for _, bad := range []string{"", "cdx-1", "../escape", "cdx-20260603-150405-XYZ", "foo/bar", "cdx-20260603-150405-9f3a1c/.."} {
+		if ValidID(bad) {
+			t.Errorf("%q should be invalid", bad)
+		}
+	}
+}
+
+func TestDirAndReadRejectTraversalID(t *testing.T) {
+	t.Setenv("CODEXMON_HOME", t.TempDir())
+	if _, err := Dir("../escape"); err == nil {
+		t.Error("Dir should reject a traversal id")
+	}
+	if _, err := ReadStatusByID("../../etc/passwd"); err == nil {
+		t.Error("ReadStatusByID should reject a traversal id")
+	}
+}
+
+func TestReconcileStaleWorker(t *testing.T) {
+	t.Setenv("CODEXMON_HOME", t.TempDir())
+	id := NewID()
+	dir, _ := Dir(id)
+	old := time.Now().Add(-time.Minute) // far past the staleness limit
+	_ = WriteStatus(dir, &Status{
+		ID: id, State: StateRunning, Health: HealthHealthy,
+		WorkerPID: os.Getpid(), StartedAt: old, UpdatedAt: old, // alive pid, but stale file
+	})
+	st, _ := ReadStatus(dir)
+	if st.State != StateFailed {
+		t.Errorf("alive-but-stale job should reconcile to failed (pid-reuse guard), got %s", st.State)
+	}
+}
+
 func TestStateActive(t *testing.T) {
 	active := []State{StateQueued, StateRunning}
 	terminal := []State{StateCompleted, StateFailed, StateStalled, StateTimeout, StateCancelled}
