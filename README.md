@@ -57,23 +57,25 @@ $ codexmon status cdx-20260603-024602-8f2560
 
 ## Why
 
-Two things make `codex` look like it has hung:
+Two things make a non-interactive agent run look like it has hung — codexmon
+neutralizes both, for every agent:
 
 1. **A piped, never-closing stdin.** Launched with a pipe on stdin that never
-   reaches EOF, `codex exec` blocks forever on
+   reaches EOF, a CLI like `codex exec` blocks forever on
    `Reading additional input from stdin…`. codexmon connects the child's stdin
    to `/dev/null` by default, so this simply can't happen.
 2. **No liveness signal.** Long model reasoning — or a wedged MCP tool — produces
    no output for a while, and nothing distinguishes "thinking hard" from "dead."
-   codexmon parses the `codex exec --json` event stream, tracks time-since-last-
-   activity, classifies it by *what Codex is doing*, and writes it all to a
-   status file you can poll.
+   codexmon parses each agent's event stream (codex's `exec --json`, Claude
+   Code's and Cursor's `stream-json`), tracks time-since-last-activity,
+   classifies it by *what the agent is doing*, and writes it all to a status
+   file you can poll.
 
-It deliberately drives `codex exec` (a one-shot process) rather than the
-`app-server` JSON-RPC path, so the **OS process exit is the authoritative
-completion signal** — there is no completion event that can fail to arrive. And
-it owns its output pipes, so even a lingering grandchild can never hang the
-monitor itself.
+It deliberately drives each agent in its one-shot, non-interactive mode rather
+than a long-lived JSON-RPC / app-server path, so the **OS process exit is the
+authoritative completion signal** — there is no completion event that can fail to
+arrive. And it owns its output pipes, so even a lingering grandchild can never
+hang the monitor itself.
 
 ## Install
 
@@ -199,11 +201,11 @@ activity.
 
 ## The watchdog (what makes it "monitoring")
 
-codexmon doesn't use one blunt timeout. Each second it classifies **what Codex
-is doing** and applies the matching rule, so a slow-but-working step is never
-mistaken for a hang:
+codexmon doesn't use one blunt timeout. Each second it classifies **what the
+agent is doing** and applies the matching rule, so a slow-but-working step is
+never mistaken for a hang:
 
-| Codex is… | Governed by | Rationale |
+| The agent is… | Governed by | Rationale |
 |---|---|---|
 | running an **MCP / tool call** | `--tool-timeout` (120s) | tools should be quick — a stuck one is caught precisely *and by name*, sooner than the idle ceiling |
 | running a **shell command** (`go test`, build) | `--wall-timeout` only | commands legitimately run for minutes; idle is expected |
@@ -239,7 +241,7 @@ its status file goes stale, `status`/`wait`/`list` **reconcile** the job to
 | `130` | cancelled |
 | `75` | `wait`'s own `--timeout` elapsed while the job was still running |
 
-A forwarded codex exit code is never allowed to collide with the `124`/`130`/`75`
+A forwarded agent exit code is never allowed to collide with the `124`/`130`/`75`
 sentinels.
 
 ## Using codexmon from Claude Code
@@ -367,7 +369,8 @@ e2e                       end-to-end tests against fake codex/claude/cursor
 
 ### Releasing
 
-Releases are cut by GoReleaser from a version tag, via
+Notable changes per version are in [`CHANGELOG.md`](CHANGELOG.md). Releases are
+cut by GoReleaser from a version tag, via
 [`.github/workflows/release.yml`](.github/workflows/release.yml):
 
 ```sh
