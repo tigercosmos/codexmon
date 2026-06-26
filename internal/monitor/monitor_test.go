@@ -102,7 +102,8 @@ func newSpec(t *testing.T, bin string, jsonMode bool, args []string, th job.Thre
 	_, _, _, _, resultFile, _ := job.Paths(dir)
 	spec := &job.Spec{
 		ID:         "test-job",
-		CodexBin:   bin,
+		Agent:      "codex",
+		AgentBin:   bin,
 		Args:       args,
 		Cwd:        dir,
 		JSONMode:   jsonMode,
@@ -384,6 +385,11 @@ func TestClassifyHealth(t *testing.T) {
 	if got := classifyHealth(mk(3), liveness{idle: 200, cmdInFlight: true}); got != job.HealthHealthy {
 		t.Errorf("in-flight command should be healthy, got %s", got)
 	}
+	// A command batched with a quick tool whose result hasn't returned yet: the
+	// command wins, so the tool's age must not make the run look stalled.
+	if got := classifyHealth(mk(3), liveness{cmdInFlight: true, toolInFlight: true, oldestTool: 999}); got != job.HealthHealthy {
+		t.Errorf("command + batched tool should be healthy, got %s", got)
+	}
 	// A tool call is judged against the tool timeout, not idle.
 	if got := classifyHealth(mk(3), liveness{idle: 200, toolInFlight: true, oldestTool: 10}); got != job.HealthHealthy {
 		t.Errorf("fresh tool call should be healthy, got %s", got)
@@ -393,6 +399,21 @@ func TestClassifyHealth(t *testing.T) {
 	}
 	if got := classifyHealth(mk(3), liveness{toolInFlight: true, oldestTool: 130}); got != job.HealthStalled {
 		t.Errorf("tool past the limit should be stalled, got %s", got)
+	}
+}
+
+func TestDecideKillCommandHoldsBatchedToolsOpen(t *testing.T) {
+	r := &runner{dir: t.TempDir(), spec: &job.Spec{
+		Thresholds: job.Thresholds{ToolStuckSec: 1, StalledSec: 0, WallSec: 0},
+	}}
+	// A long command in flight alongside a batched tool that is past the tool
+	// timeout must NOT be killed as a stuck tool — the command holds it open.
+	if st, reason := r.decideKill(liveness{cmdInFlight: true, toolInFlight: true, oldestTool: 100}); st != "" {
+		t.Errorf("command in flight should suppress the tool-stuck kill, got %s (%q)", st, reason)
+	}
+	// With no command, the same stuck tool IS caught (codex behavior preserved).
+	if st, _ := r.decideKill(liveness{toolInFlight: true, oldestTool: 100}); st != job.StateStalled {
+		t.Errorf("a lone stuck tool should stall, got %s", st)
 	}
 }
 

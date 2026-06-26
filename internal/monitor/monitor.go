@@ -1,17 +1,19 @@
-// Package monitor supervises a single codex child process: it streams and
-// parses output, maintains a live status file, and enforces the watchdog
-// policy (heartbeat, stall ceiling, wall-clock timeout, cancellation).
+// Package monitor supervises a single agent child process (codex, Claude Code,
+// or Cursor): it streams and parses output via the selected agent.Provider,
+// maintains a live status file, and enforces the watchdog policy (heartbeat,
+// stall ceiling, wall-clock timeout, cancellation).
 //
-// The design deliberately avoids the codex app-server JSON-RPC path, whose
-// turn-completion notifications can silently never arrive. `codex exec` is a
-// one-shot process, so its OS-level exit is the authoritative completion
-// signal. To make that literally true, the monitor waits on the process (not
-// on pipe EOF) and force-closes its own pipe read-ends if a lingering
-// grandchild keeps them open — so the monitor can never itself hang silently.
+// The design deliberately drives each agent in its one-shot, non-interactive
+// mode so the OS-level process exit is the authoritative completion signal,
+// rather than a stream "done" event that can silently never arrive. To make
+// that literally true, the monitor waits on the process (not on pipe EOF) and
+// force-closes its own pipe read-ends if a lingering grandchild keeps them open
+// — so the monitor can never itself hang silently.
 package monitor
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -19,7 +21,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tigercosmos/codexmon/internal/events"
+	"github.com/tigercosmos/codexmon/internal/agent"
+	_ "github.com/tigercosmos/codexmon/internal/agent/all" // register built-in agent providers
 	"github.com/tigercosmos/codexmon/internal/job"
 	"github.com/tigercosmos/codexmon/internal/proc"
 )
@@ -51,9 +54,11 @@ type Options struct {
 }
 
 type runner struct {
-	dir  string
-	spec *job.Spec
-	opts Options
+	dir       string
+	spec      *job.Spec
+	opts      Options
+	provider  agent.Provider
+	agentName string // "codex" / "claude" / "cursor", for log + error text
 
 	logMu     sync.Mutex
 	logF      *os.File
@@ -80,23 +85,15 @@ type runner struct {
 	finalized bool
 }
 
-// inflightItem is an item codex started but has not completed. We classify it so
-// the watchdog can apply the right liveness rule: a shell command may run long
+// inflightItem is a unit of work the agent started but has not completed. Its
+// Kind drives the watchdog's liveness rule: a shell command may run long
 // (wall-timeout only), an MCP/tool call gets a dedicated stuck-timeout, and a
-// fully-quiet codex (nothing in flight) is governed by the idle ceiling.
+// fully-quiet agent (nothing in flight) is governed by the idle ceiling.
 type inflightItem struct {
-	kind    itemKind
+	kind    agent.ItemKind
 	started time.Time
 	label   string
 }
-
-type itemKind int
-
-const (
-	kindOther itemKind = iota
-	kindCommand
-	kindTool
-)
 
 const stderrTailMax = 12
 
@@ -105,11 +102,17 @@ const stderrTailMax = 12
 func Run(dir string, spec *job.Spec, opts Options) (*job.Status, error) {
 	_, _, eventsFile, logFile, resultFile, _ := job.Paths(dir)
 
+	agentName := spec.Agent
+	if agentName == "" {
+		agentName = agent.DefaultName
+	}
+
 	now := time.Now()
 	r := &runner{
 		dir:          dir,
 		spec:         spec,
 		opts:         opts,
+		agentName:    agentName,
 		start:        now,
 		lastActivity: now,
 		inFlight:     map[string]inflightItem{},
@@ -117,8 +120,9 @@ func Run(dir string, spec *job.Spec, opts Options) (*job.Status, error) {
 			ID:         spec.ID,
 			State:      job.StateRunning,
 			Health:     job.HealthStarting,
-			Phase:      string(events.PhaseStarting),
-			CodexBin:   spec.CodexBin,
+			Phase:      string(agent.PhaseStarting),
+			Agent:      agentName,
+			AgentBin:   spec.AgentBin,
 			Args:       spec.Args,
 			Cwd:        spec.Cwd,
 			JSONMode:   spec.JSONMode,
@@ -132,6 +136,11 @@ func Run(dir string, spec *job.Spec, opts Options) (*job.Status, error) {
 			Title:      spec.Title,
 		},
 	}
+	prov, err := agent.Get(agentName)
+	if err != nil {
+		return r.fail(err.Error()), err
+	}
+	r.provider = prov
 	if spec.JSONMode {
 		r.st.EventsFile = eventsFile
 	}
@@ -154,7 +163,7 @@ func Run(dir string, spec *job.Spec, opts Options) (*job.Status, error) {
 		r.evF = evF
 	}
 
-	cmd := exec.Command(spec.CodexBin, spec.Args...)
+	cmd := exec.Command(spec.AgentBin, spec.Args...)
 	cmd.Dir = spec.Cwd
 	if len(spec.Env) > 0 {
 		cmd.Env = spec.Env
@@ -184,7 +193,7 @@ func Run(dir string, spec *job.Spec, opts Options) (*job.Status, error) {
 		wOut.Close()
 		rErr.Close()
 		wErr.Close()
-		return r.fail("start codex: " + err.Error()), err
+		return r.fail("start " + r.agentName + ": " + err.Error()), err
 	}
 	// The child holds its own dup of the write ends; the parent must release its
 	// copies or the read ends would never reach EOF.
@@ -192,15 +201,15 @@ func Run(dir string, spec *job.Spec, opts Options) (*job.Status, error) {
 	wErr.Close()
 
 	r.mu.Lock()
-	r.st.CodexPID = cmd.Process.Pid
+	r.st.AgentPID = cmd.Process.Pid
 	r.persistLocked()
 	r.mu.Unlock()
-	r.emit("started codex pid " + itoa(cmd.Process.Pid) + " (" + spec.Title + ")")
+	r.emit("started " + r.agentName + " pid " + itoa(cmd.Process.Pid) + " (" + spec.Title + ")")
 
 	var readers sync.WaitGroup
 	readers.Add(2)
-	go func() { defer readers.Done(); r.readStdout(rOut) }()
-	go func() { defer readers.Done(); r.readStderr(rErr) }()
+	go func() { defer readers.Done(); defer r.guard(cmd); r.readStdout(rOut) }()
+	go func() { defer readers.Done(); defer r.guard(cmd); r.readStderr(rErr) }()
 
 	// Authoritative completion: wait on the process itself.
 	procExited := make(chan struct{})
@@ -213,7 +222,7 @@ func Run(dir string, spec *job.Spec, opts Options) (*job.Status, error) {
 	stopWatch := make(chan struct{})
 	var watchDone sync.WaitGroup
 	watchDone.Add(1)
-	go func() { defer watchDone.Done(); r.watchdog(cmd, procExited, stopWatch) }()
+	go func() { defer watchDone.Done(); defer r.guard(cmd); r.watchdog(cmd, procExited, stopWatch) }()
 
 	<-procExited // the process has exited; exit code is now available
 
@@ -253,6 +262,27 @@ func (r *runner) touch() {
 	r.mu.Unlock()
 }
 
+// guard recovers a panic in a reader/watchdog goroutine and tears the agent
+// down instead of letting the worker die with the child orphaned. It forces the
+// run to finalize as failed (a panic must never be masked as a clean exit).
+func (r *runner) guard(cmd *exec.Cmd) {
+	v := recover()
+	if v == nil {
+		return
+	}
+	msg := "internal monitor panic: " + fmt.Sprint(v)
+	r.mu.Lock()
+	r.killState = job.StateFailed
+	if r.st.Error == "" {
+		r.st.Error = msg
+	}
+	r.mu.Unlock()
+	r.emit("terminating " + r.agentName + ": " + msg)
+	if cmd.Process != nil {
+		proc.TerminateGroup(cmd.Process.Pid, 2*time.Second)
+	}
+}
+
 func (r *runner) readStdout(stdout io.Reader) {
 	br := bufio.NewReader(stdout)
 	for {
@@ -270,7 +300,7 @@ func (r *runner) handleStdoutLine(line string) {
 	r.touch()
 	if r.spec.JSONMode {
 		r.writeEvents(line)
-		ev, ok := events.Parse(line)
+		ev, ok := r.provider.ParseLine(line)
 		if !ok {
 			return
 		}
@@ -284,17 +314,20 @@ func (r *runner) handleStdoutLine(line string) {
 	r.mu.Unlock()
 }
 
-func (r *runner) applyEvent(ev events.Event) {
-	phase, summary := ev.Describe()
+// applyEvent merges one normalized agent.Event into the live status: it advances
+// the phase, records the latest step, tracks in-flight work for the watchdog,
+// captures the result text, and notes failures. This logic is agent-agnostic;
+// all per-agent interpretation happened in the provider's ParseLine.
+func (r *runner) applyEvent(ev agent.Event) {
 	r.mu.Lock()
 	r.st.EventCount++
 	now := time.Now()
 	r.st.LastEventAt = &now
-	if summary != "" {
-		r.st.LastEvent = summary
+	if ev.Summary != "" {
+		r.st.LastEvent = ev.Summary
 	}
-	if phase != "" {
-		r.st.Phase = string(phase)
+	if ev.Phase != "" {
+		r.st.Phase = string(ev.Phase)
 	}
 	if ev.ThreadID != "" {
 		r.st.ThreadID = ev.ThreadID
@@ -302,62 +335,30 @@ func (r *runner) applyEvent(ev events.Event) {
 	if ev.Usage != nil {
 		r.st.Usage = ev.Usage
 	}
-	if ev.Item != nil && ev.Item.ID != "" {
-		switch ev.Type {
-		case "item.started":
-			if kind := classifyItem(ev.Item.Type); kind != kindOther {
-				r.inFlight[ev.Item.ID] = inflightItem{kind: kind, started: now, label: itemLabel(ev.Item)}
-			}
-		case "item.completed", "item.failed":
-			delete(r.inFlight, ev.Item.ID)
+	for _, it := range ev.Started {
+		if it.ID == "" {
+			continue
 		}
+		if _, tracked := r.inFlight[it.ID]; tracked {
+			continue // already in flight; don't reset its start time (tool-age timer)
+		}
+		r.inFlight[it.ID] = inflightItem{kind: it.Kind, started: now, label: it.Label}
 	}
-	if ev.Item != nil && ev.Item.Type == "agent_message" && ev.Type == "item.completed" && ev.Item.Text != "" {
-		r.resultText = ev.Item.Text
+	for _, id := range ev.Finished {
+		delete(r.inFlight, id)
 	}
-	// `codex exec review` delivers its findings as the review payload of an
-	// exited-review-mode item rather than a plain agent_message; capture it so
-	// the review output is surfaced as the result.
-	if ev.Item != nil && ev.Type == "item.completed" && ev.Item.Review != "" {
-		r.resultText = ev.Item.Review
+	if ev.Result != "" {
+		r.resultText = ev.Result
 	}
-	if ev.Type == "error" || ev.Type == "turn.failed" {
+	if ev.Failure {
 		r.sawFailureEvent = true
 		if r.st.Error == "" {
-			r.st.Error = summary
+			r.st.Error = agent.FirstNonEmpty(ev.FailMsg, ev.Summary)
 		}
 	}
 	r.mu.Unlock()
-	if summary != "" {
-		r.emit(summary)
-	}
-}
-
-// classifyItem buckets an item type for the watchdog's liveness rules.
-func classifyItem(itemType string) itemKind {
-	switch itemType {
-	case "command_execution":
-		return kindCommand
-	case "mcp_tool_call", "dynamic_tool_call", "web_search":
-		return kindTool
-	default:
-		return kindOther
-	}
-}
-
-// itemLabel is a short human label for an in-flight item, used in kill reasons.
-func itemLabel(it *events.Item) string {
-	switch it.Type {
-	case "command_execution":
-		return preview(it.Command, 60)
-	case "mcp_tool_call":
-		return it.Server + "/" + it.Tool
-	case "dynamic_tool_call":
-		return it.Tool
-	case "web_search":
-		return preview(it.Query, 60)
-	default:
-		return it.Type
+	if ev.Summary != "" {
+		r.emit(ev.Summary)
 	}
 }
 
@@ -450,7 +451,7 @@ func (r *runner) watchdog(cmd *exec.Cmd, procExited <-chan struct{}, stop <-chan
 				r.st.Error = killReason // precise reason (names the stuck tool, idle, etc.)
 			}
 			r.mu.Unlock()
-			r.emit("terminating codex: " + killReason)
+			r.emit("terminating " + r.agentName + ": " + killReason)
 			proc.TerminateGroup(cmd.Process.Pid, 3*time.Second)
 			return
 		}
@@ -480,9 +481,9 @@ func (r *runner) livenessLocked(now time.Time) liveness {
 	}
 	for _, it := range r.inFlight {
 		switch it.kind {
-		case kindCommand:
+		case agent.KindCommand:
 			lv.cmdInFlight = true
-		case kindTool:
+		case agent.KindTool:
 			lv.toolInFlight = true
 			if age := now.Sub(it.started).Seconds(); age > lv.oldestTool {
 				lv.oldestTool = age
@@ -497,11 +498,13 @@ func (r *runner) livenessLocked(now time.Time) liveness {
 // terminal state and reason, WITHOUT committing it — the watchdog commits only
 // after a final exit check, so a natural exit always wins the race.
 //
-// The rule depends on what codex is doing:
+// The rule depends on what the agent is doing:
 //   - a single MCP/tool call held open too long → stalled (catches a hung tool
 //     precisely, faster than the idle ceiling);
-//   - a shell command in flight → no idle/stall kill (it may legitimately run
-//     long); only the wall-clock timeout applies;
+//   - a shell command in flight → no idle/stall/tool kill (it may legitimately
+//     run long, and some agents batch quick tool calls alongside it so those
+//     tools stay "in flight" until the command's results return); only the
+//     wall-clock timeout applies;
 //   - nothing in flight (quiet model phase) → the idle ceiling applies.
 //
 // Caller holds r.mu.
@@ -510,7 +513,10 @@ func (r *runner) decideKill(lv liveness) (state job.State, reason string) {
 	if job.CancelRequested(r.dir) {
 		return job.StateCancelled, "cancel requested"
 	}
-	if t := th.ToolStuckSec; t > 0 && lv.oldestTool >= t {
+	// Only enforce the tool timeout when no shell command is in flight: a running
+	// command can legitimately hold a co-issued tool batch open past the limit,
+	// and the command itself is bounded by the wall clock.
+	if t := th.ToolStuckSec; t > 0 && !lv.cmdInFlight && lv.oldestTool >= t {
 		label := lv.toolLabel
 		if label == "" {
 			label = "tool call"
@@ -535,7 +541,16 @@ func classifyHealth(st *job.Status, lv liveness) job.Health {
 	if st.EventCount == 0 && st.JSONMode && (slow <= 0 || lv.idle < slow) {
 		return job.HealthStarting
 	}
-	// A tool call in flight is judged against the tool timeout, not the idle clock.
+	// A shell command in flight means the agent is actively working even while
+	// quiet. It takes precedence over a co-issued tool call: some agents (e.g.
+	// Claude Code) emit a *batch* of tool calls — a long Bash plus quick reads —
+	// whose results all return together, so a quick tool can look "in flight" for
+	// the whole command. While a command runs, the run is healthy and governed by
+	// the wall clock, not the tool timeout.
+	if lv.cmdInFlight {
+		return job.HealthHealthy
+	}
+	// A lone tool call is judged against the tool timeout, not the idle clock.
 	if lv.toolInFlight {
 		switch {
 		case toolLimit > 0 && lv.oldestTool >= toolLimit:
@@ -545,10 +560,6 @@ func classifyHealth(st *job.Status, lv liveness) job.Health {
 		default:
 			return job.HealthHealthy
 		}
-	}
-	// A shell command in flight means codex is actively working even while quiet.
-	if lv.cmdInFlight {
-		return job.HealthHealthy
 	}
 	switch {
 	case stalled > 0 && lv.idle >= stalled:
@@ -603,8 +614,8 @@ func (r *runner) finalize(cmd *exec.Cmd, waitErr error, resultFile string) *job.
 
 	switch {
 	case r.killState != "":
-		// The watchdog deliberately terminated codex (cancel/stall/timeout).
-		// Honor that verdict regardless of the exit code: codex may exit 0 in
+		// The watchdog deliberately terminated the agent (cancel/stall/timeout).
+		// Honor that verdict regardless of the exit code: an agent may exit 0 in
 		// response to our SIGTERM, and reporting "completed" would mask a real
 		// hang — the exact failure codexmon exists to surface. A genuinely
 		// natural exit never reaches here with killState set, because the
@@ -641,8 +652,9 @@ func (r *runner) finalize(cmd *exec.Cmd, waitErr error, resultFile string) *job.
 }
 
 // captureResultLocked returns the best available final output. Prefers the
-// codex --output-last-message file, then the streamed agent_message, then the
-// accumulated stdout (non-JSON mode). Caller holds r.mu.
+// agent's result file (codex's --output-last-message), then the result captured
+// from the event stream, then the accumulated stdout (non-JSON mode). Caller
+// holds r.mu.
 func (r *runner) captureResultLocked(resultFile string) string {
 	if data, err := os.ReadFile(resultFile); err == nil {
 		if s := strings.TrimSpace(string(data)); s != "" {
@@ -657,9 +669,9 @@ func (r *runner) captureResultLocked(resultFile string) string {
 
 func (r *runner) failureMessageLocked(exitCode int) string {
 	if len(r.stderrTail) > 0 {
-		return "codex exited " + itoa(exitCode) + ": " + r.stderrTail[len(r.stderrTail)-1]
+		return r.agentName + " exited " + itoa(exitCode) + ": " + r.stderrTail[len(r.stderrTail)-1]
 	}
-	return "codex exited with code " + itoa(exitCode)
+	return r.agentName + " exited with code " + itoa(exitCode)
 }
 
 func (r *runner) persistLocked() {
@@ -707,6 +719,9 @@ func (r *runner) writeEvents(line string) {
 		return
 	}
 	if r.evBytes+int64(len(line)) > maxLogBytes {
+		// Mirror output.log's truncation notice so the events stream doesn't
+		// silently end; keep it valid JSONL so parsers don't choke.
+		_, _ = r.evF.WriteString(`{"type":"codexmon.truncated","note":"events capped at ` + itoa(maxLogBytes>>20) + ` MiB"}` + "\n")
 		r.evCapped = true
 		return
 	}

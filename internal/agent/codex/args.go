@@ -1,21 +1,10 @@
-// Package codexcli locates the codex binary and analyzes the arguments handed
-// through to it, deciding whether the run can be monitored via the structured
-// `--json` event stream.
-package codexcli
+package codex
 
 import (
-	"os"
-	"os/exec"
 	"strings"
-)
 
-// Resolve finds the codex executable. Order: $CODEXMON_CODEX, then PATH.
-func Resolve() (string, error) {
-	if bin := strings.TrimSpace(os.Getenv("CODEXMON_CODEX")); bin != "" {
-		return bin, nil
-	}
-	return exec.LookPath("codex")
-}
+	"github.com/tigercosmos/codexmon/internal/agent"
+)
 
 // flagsTakingValue is the set of codex flags whose following token is a value
 // (so the subcommand scanner must skip it). Covers global + common exec flags.
@@ -71,14 +60,6 @@ func subcommandIndex(args []string) int {
 	return -1
 }
 
-// Analysis is the outcome of inspecting the passthrough args.
-type Analysis struct {
-	IsExec   bool     // the codex subcommand is `exec` (supports --json)
-	JSONMode bool     // codexmon will parse a JSON event stream
-	Args     []string // possibly-augmented args to pass to codex
-	Title    string   // short human label, e.g. "codex exec review"
-}
-
 func hasFlag(args []string, names ...string) bool {
 	want := map[string]bool{}
 	for _, n := range names {
@@ -100,7 +81,7 @@ func hasFlag(args []string, names ...string) bool {
 // caller already set one, `--output-last-message <resultFile>` as a reliable
 // final-answer backup. Injected flags are placed right after the `exec` token,
 // where they apply to exec and any of its sub-subcommands (review/resume).
-func Analyze(args []string, resultFile string, allowJSON bool) Analysis {
+func Analyze(args []string, resultFile string, allowJSON bool) agent.Analysis {
 	subIdx := subcommandIndex(args)
 	sub := ""
 	if subIdx >= 0 {
@@ -124,7 +105,6 @@ func Analyze(args []string, resultFile string, allowJSON bool) Analysis {
 	}
 
 	out := append([]string(nil), args...)
-	jsonMode := false
 	if isExec && allowJSON {
 		var inject []string
 		// Scope the "already present?" check to the exec option region so a
@@ -141,10 +121,13 @@ func Analyze(args []string, resultFile string, allowJSON bool) Analysis {
 			// literal "exec", which could be a flag value or earlier positional.
 			out = injectAt(out, subIdx+1, inject)
 		}
-		jsonMode = true
 	}
 
-	return Analysis{IsExec: isExec, JSONMode: jsonMode, Args: out, Title: title}
+	// JSONMode reflects reality: monitor the event stream only when --json is
+	// actually present in the final args (whether we injected it or it was
+	// already there), never merely because the subcommand is exec.
+	jsonMode := isExec && allowJSON && hasFlag(out, "--json")
+	return agent.Analysis{JSONMode: jsonMode, Args: out, Title: title}
 }
 
 // execOptionsHaveFlag reports whether any of names appears as a real flag in the

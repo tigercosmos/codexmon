@@ -1,4 +1,4 @@
-package codexcli
+package codex
 
 import (
 	"reflect"
@@ -38,8 +38,8 @@ func TestSubcommand(t *testing.T) {
 
 func TestAnalyzeExecInjectsJSON(t *testing.T) {
 	a := Analyze([]string{"exec", "review", "--uncommitted"}, "/tmp/result.txt", true)
-	if !a.IsExec || !a.JSONMode {
-		t.Fatalf("expected exec+json, got %+v", a)
+	if !a.JSONMode {
+		t.Fatalf("expected json mode, got %+v", a)
 	}
 	if !hasFlag(a.Args, "--json") {
 		t.Errorf("expected --json injected, got %v", a.Args)
@@ -83,7 +83,7 @@ func TestAnalyzeInjectionPositionWithExecValue(t *testing.T) {
 	// A flag value equal to "exec" before the real subcommand must not fool the
 	// injector: --json must land after the actual exec subcommand token.
 	a := Analyze([]string{"-c", "exec", "exec", "prompt"}, "/tmp/r", true)
-	if !a.IsExec {
+	if !a.JSONMode {
 		t.Fatalf("should detect exec subcommand, got %+v", a)
 	}
 	// args: [-c exec exec --json --output-last-message /tmp/r prompt]
@@ -107,7 +107,7 @@ func TestSubcommandSkipsApprovalValue(t *testing.T) {
 
 func TestAnalyzeApprovalFlagStillDetectsExec(t *testing.T) {
 	a := Analyze([]string{"-a", "never", "exec", "hi"}, "/tmp/r", true)
-	if !a.IsExec || !a.JSONMode || !hasFlag(a.Args, "--json") {
+	if !a.JSONMode || !hasFlag(a.Args, "--json") {
 		t.Fatalf("-a value should not break exec detection: %+v", a)
 	}
 }
@@ -126,7 +126,7 @@ func TestAnalyzePromptTokenDoesNotSuppressInjection(t *testing.T) {
 
 func TestAnalyzeExecAlias(t *testing.T) {
 	a := Analyze([]string{"e", "review", "--uncommitted"}, "/tmp/r", true)
-	if !a.IsExec || !a.JSONMode {
+	if !a.JSONMode {
 		t.Fatalf("`e` alias should be treated as exec: %+v", a)
 	}
 	if a.Args[0] != "e" || a.Args[1] != "--json" {
@@ -139,7 +139,7 @@ func TestAnalyzeExecAlias(t *testing.T) {
 
 func TestAnalyzeNonExecNoJSON(t *testing.T) {
 	a := Analyze([]string{"review", "--base", "main"}, "/tmp/result.txt", true)
-	if a.IsExec || a.JSONMode {
+	if a.JSONMode {
 		t.Fatalf("review is not exec; got %+v", a)
 	}
 	if hasFlag(a.Args, "--json") {

@@ -2,69 +2,63 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
-	"github.com/tigercosmos/codexmon/internal/codexcli"
+	"github.com/tigercosmos/codexmon/internal/agent"
 )
 
-// doctorReport summarizes whether codex is installed and usable.
-type doctorReport struct {
-	Ready      bool            `json:"ready"`
-	CodexBin   string          `json:"codex_bin"`
-	Version    string          `json:"version,omitempty"`
-	DoctorOK   bool            `json:"doctor_ok"`
-	Doctor     json.RawMessage `json:"doctor,omitempty"`
-	DoctorText string          `json:"doctor_text,omitempty"`
-	Problems   []string        `json:"problems,omitempty"`
-}
-
 func cmdDoctor(args []string) int {
-	_, flags := splitIDAndFlags(args)
-	jsonOut := flags["--json"]
-
-	rep := doctorReport{}
-	bin, err := codexcli.Resolve()
-	if err != nil {
-		rep.Problems = append(rep.Problems, "codex CLI not found on PATH (install it or set CODEXMON_CODEX)")
-		return emitDoctor(rep, jsonOut)
-	}
-	rep.CodexBin = bin
-
-	if out, err := runCapture(5*time.Second, bin, "--version"); err == nil {
-		rep.Version = strings.TrimSpace(out)
-	} else if err == context.DeadlineExceeded {
-		rep.Problems = append(rep.Problems, "`codex --version` timed out — the codex install may be wedged")
-	} else {
-		rep.Problems = append(rep.Problems, "`codex --version` failed: "+strings.TrimSpace(out))
-	}
-
-	// `codex doctor --json` covers install/config/auth/runtime health. We bound
-	// it with a timeout because a stuck environment is exactly what we report.
-	out, derr := runCapture(30*time.Second, bin, "doctor", "--json")
-	switch {
-	case derr == context.DeadlineExceeded:
-		rep.Problems = append(rep.Problems, "`codex doctor` timed out after 30s — Codex is not responding")
-		rep.DoctorText = strings.TrimSpace(out)
-	case derr != nil:
-		rep.Problems = append(rep.Problems, "`codex doctor` failed")
-		rep.DoctorText = strings.TrimSpace(out)
-	default:
-		rep.DoctorOK = true
-		if trimmed := strings.TrimSpace(out); strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
-			rep.Doctor = json.RawMessage(trimmed)
-		} else {
-			rep.DoctorText = trimmed
+	jsonOut := false
+	sel := ""
+	s := &flagScan{args: args}
+	for s.i = 0; s.i < len(args); s.i++ {
+		name, attached := splitFlag(args[s.i])
+		switch name {
+		case "--json":
+			if err := noValue(name, attached); err != nil {
+				return fail(err)
+			}
+			jsonOut = true
+		case "--agent":
+			v, err := s.value(name, attached)
+			if err != nil {
+				return fail(err)
+			}
+			sel = v
+		default:
+			return fail(fmt.Errorf("unknown flag %q for doctor", args[s.i]))
 		}
 	}
 
-	rep.Ready = rep.Version != "" && rep.DoctorOK && len(rep.Problems) == 0
-	return emitDoctor(rep, jsonOut)
+	prov, agentName, err := resolveAgent(sel)
+	if err != nil {
+		return fail(err)
+	}
+
+	bin, berr := agent.ResolveBin(prov, "")
+	if berr != nil {
+		rep := agent.DoctorReport{
+			Agent:    agentName,
+			Problems: []string{fmt.Sprintf("%s CLI not found on PATH (install it or set %s)", agentName, prov.BinEnv())},
+		}
+		return emitDoctor(rep, jsonOut)
+	}
+	return emitDoctor(prov.Doctor(bin, doctorRun), jsonOut)
 }
 
-func emitDoctor(rep doctorReport, jsonOut bool) int {
+// doctorRun adapts runCapture to the agent.RunFunc contract, mapping the
+// deadline error to agent.ErrTimeout so providers can report a wedged probe
+// distinctly from an ordinary failure.
+func doctorRun(timeout time.Duration, name string, args ...string) (string, error) {
+	out, err := runCapture(timeout, name, args...)
+	if err == context.DeadlineExceeded {
+		return out, agent.ErrTimeout
+	}
+	return out, err
+}
+
+func emitDoctor(rep agent.DoctorReport, jsonOut bool) int {
 	if jsonOut {
 		printJSON(rep)
 	} else {
@@ -72,21 +66,23 @@ func emitDoctor(rep doctorReport, jsonOut bool) int {
 		if !rep.Ready {
 			icon = "❌"
 		}
-		fmt.Printf("%s codex doctor\n", icon)
-		if rep.CodexBin != "" {
-			fmt.Printf("  binary:  %s\n", rep.CodexBin)
+		fmt.Printf("%s %s doctor\n", icon, rep.Agent)
+		if rep.Bin != "" {
+			fmt.Printf("  binary:  %s\n", rep.Bin)
 		}
 		if rep.Version != "" {
 			fmt.Printf("  version: %s\n", rep.Version)
 		}
-		fmt.Printf("  doctor:  %s\n", boolWord(rep.DoctorOK, "ok", "not ok"))
+		if rep.HealthName != "" {
+			fmt.Printf("  %s: %s\n", rep.HealthName, boolWord(rep.HealthOK, "ok", "not ok"))
+		}
 		for _, p := range rep.Problems {
 			fmt.Printf("  ⚠ %s\n", p)
 		}
 		if rep.Ready {
-			fmt.Println("  → Codex is installed and responding. Safe to run reviews.")
+			fmt.Printf("  → %s is installed and responding. Safe to run reviews.\n", rep.Agent)
 		} else {
-			fmt.Println("  → Resolve the issues above before relying on Codex.")
+			fmt.Println("  → Resolve the issues above before relying on this agent.")
 		}
 	}
 	if rep.Ready {

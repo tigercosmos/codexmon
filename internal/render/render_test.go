@@ -5,14 +5,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tigercosmos/codexmon/internal/events"
+	"github.com/tigercosmos/codexmon/internal/agent"
 	"github.com/tigercosmos/codexmon/internal/job"
 )
 
 func sampleRunning() *job.Status {
 	return &job.Status{
 		ID: "cdx-1", State: job.StateRunning, Health: job.HealthHealthy, Phase: "reviewing",
-		Title: "codex exec review", CodexPID: 123, WorkerPID: 100,
+		Title: "codex exec review", Agent: "codex", AgentPID: 123, WorkerPID: 100,
 		ElapsedSec: 47, IdleSec: 3, EventCount: 12, LastEvent: "ran: go test (exit 0)",
 		ThreadID:   "thr-1",
 		Thresholds: job.Thresholds{SlowAfterSec: 30, StalledSec: 180, ToolStuckSec: 120, WallSec: 600},
@@ -75,7 +75,7 @@ func TestListEmptyAndNonEmpty(t *testing.T) {
 func TestResult(t *testing.T) {
 	s := sampleRunning()
 	s.State = job.StateCompleted
-	s.Usage = &events.Usage{InputTokens: 100, OutputTokens: 20}
+	s.Usage = &agent.Usage{InputTokens: 100, OutputTokens: 20}
 	out := Result(s, "The review found 2 issues.")
 	for _, want := range []string{"codex exec review", "completed", "100", "20", "found 2 issues"} {
 		if !strings.Contains(out, want) {

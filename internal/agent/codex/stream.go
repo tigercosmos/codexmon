@@ -1,6 +1,17 @@
-// Package events parses the JSONL event stream emitted by `codex exec --json`.
-//
-// A real stream looks like:
+// Package codex adapts the OpenAI Codex CLI (`codex`) to codexmon's agent
+// contract: it locates the binary, injects the `exec --json` /
+// `--output-last-message` flags that make a run observable, and parses codex's
+// JSONL event stream into the normalized agent.Event the monitor consumes.
+package codex
+
+import (
+	"encoding/json"
+	"strings"
+
+	"github.com/tigercosmos/codexmon/internal/agent"
+)
+
+// A real `codex exec --json` stream looks like:
 //
 //	{"type":"thread.started","thread_id":"019e..."}
 //	{"type":"turn.started"}
@@ -11,19 +22,13 @@
 //
 // The parser is deliberately lenient: unknown event or item types are kept as
 // "activity" so the monitor never mistakes a still-working Codex for a dead one.
-package events
-
-import (
-	"encoding/json"
-	"strings"
-)
 
 // Event is a single line of the `codex exec --json` stream.
 type Event struct {
 	Type     string          `json:"type"`
 	ThreadID string          `json:"thread_id,omitempty"`
 	Item     *Item           `json:"item,omitempty"`
-	Usage    *Usage          `json:"usage,omitempty"`
+	Usage    *agent.Usage    `json:"usage,omitempty"`
 	Error    json.RawMessage `json:"error,omitempty"`
 	Message  string          `json:"message,omitempty"`
 }
@@ -51,14 +56,6 @@ type FileChange struct {
 	Kind string `json:"kind,omitempty"`
 }
 
-// Usage is the token accounting reported on turn.completed.
-type Usage struct {
-	InputTokens           int `json:"input_tokens"`
-	CachedInputTokens     int `json:"cached_input_tokens"`
-	OutputTokens          int `json:"output_tokens"`
-	ReasoningOutputTokens int `json:"reasoning_output_tokens"`
-}
-
 // Parse decodes a single JSONL line. ok is false for blank lines or lines that
 // are not valid JSON objects (Codex occasionally prints stray banner text).
 func Parse(line string) (Event, bool) {
@@ -76,44 +73,25 @@ func Parse(line string) (Event, bool) {
 	return ev, true
 }
 
-// Phase is a coarse, human-meaningful stage label derived from an event. It is
-// what `codexmon status` shows so a watcher can tell *what* Codex is doing.
-type Phase string
-
-const (
-	PhaseStarting    Phase = "starting"
-	PhaseThinking    Phase = "thinking"
-	PhaseRunning     Phase = "running"
-	PhaseVerifying   Phase = "verifying"
-	PhaseEditing     Phase = "editing"
-	PhaseInvestigate Phase = "investigating"
-	PhaseSearching   Phase = "searching"
-	PhaseReviewing   Phase = "reviewing"
-	PhaseWriting     Phase = "writing"
-	PhaseFinalizing  Phase = "finalizing"
-	PhaseCompleted   Phase = "completed"
-	PhaseFailed      Phase = "failed"
-)
-
 // Describe returns the phase implied by an event plus a one-line, human-readable
-// summary suitable for a status line or log. phase is empty when the event does
-// not change the phase (the caller keeps the previous phase).
-func (ev Event) Describe() (phase Phase, summary string) {
+// summary. phase is empty when the event does not change the phase (the caller
+// keeps the previous phase).
+func (ev Event) Describe() (phase agent.Phase, summary string) {
 	switch ev.Type {
 	case "thread.started":
-		return PhaseStarting, "thread started"
+		return agent.PhaseStarting, "thread started"
 	case "turn.started":
-		return PhaseStarting, "turn started"
+		return agent.PhaseStarting, "turn started"
 	case "turn.completed":
-		return PhaseCompleted, "turn completed" + usageSuffix(ev.Usage)
+		return agent.PhaseCompleted, "turn completed" + usageSuffix(ev.Usage)
 	case "turn.failed":
-		return PhaseFailed, "turn failed" + rawSuffix(ev.Error)
+		return agent.PhaseFailed, "turn failed" + rawSuffix(ev.Error)
 	case "error":
 		msg := ev.Message
 		if msg == "" {
 			msg = string(ev.Error)
 		}
-		return PhaseFailed, "error: " + shorten(msg, 120)
+		return agent.PhaseFailed, "error: " + shorten(msg, 120)
 	case "item.started", "item.updated", "item.completed":
 		if ev.Item == nil {
 			return "", ev.Type
@@ -125,20 +103,20 @@ func (ev Event) Describe() (phase Phase, summary string) {
 	}
 }
 
-func (it *Item) describe(lifecycle string) (Phase, string) {
+func (it *Item) describe(lifecycle string) (agent.Phase, string) {
 	done := lifecycle == "item.completed"
 	switch it.Type {
 	case "agent_message":
 		if done {
-			return PhaseWriting, "message: " + shorten(it.Text, 120)
+			return agent.PhaseWriting, "message: " + shorten(it.Text, 120)
 		}
-		return PhaseWriting, "drafting message"
+		return agent.PhaseWriting, "drafting message"
 	case "reasoning":
-		return PhaseThinking, "reasoning"
+		return agent.PhaseThinking, "reasoning"
 	case "command_execution":
-		phase := PhaseRunning
+		phase := agent.PhaseRunning
 		if looksLikeVerification(it.Command) {
-			phase = PhaseVerifying
+			phase = agent.PhaseVerifying
 		}
 		if done {
 			ec := "?"
@@ -150,21 +128,49 @@ func (it *Item) describe(lifecycle string) (Phase, string) {
 		return phase, "running: " + shorten(it.Command, 96)
 	case "file_change":
 		if done {
-			return PhaseEditing, "edited " + itoa(len(it.Changes)) + " file(s)"
+			return agent.PhaseEditing, "edited " + itoa(len(it.Changes)) + " file(s)"
 		}
-		return PhaseEditing, "editing files"
+		return agent.PhaseEditing, "editing files"
 	case "mcp_tool_call":
-		return PhaseInvestigate, "tool " + it.Server + "/" + it.Tool
+		return agent.PhaseInvestigate, "tool " + it.Server + "/" + it.Tool
 	case "dynamic_tool_call":
-		return PhaseInvestigate, "tool " + it.Tool
+		return agent.PhaseInvestigate, "tool " + it.Tool
 	case "web_search":
-		return PhaseSearching, "search: " + shorten(it.Query, 96)
+		return agent.PhaseSearching, "search: " + shorten(it.Query, 96)
 	case "entered_review_mode", "enteredReviewMode":
-		return PhaseReviewing, "reviewer started"
+		return agent.PhaseReviewing, "reviewer started"
 	case "exited_review_mode", "exitedReviewMode":
-		return PhaseFinalizing, "reviewer finished"
+		return agent.PhaseFinalizing, "reviewer finished"
 	default:
 		return "", lifecycle + " " + it.Type
+	}
+}
+
+// classifyItem buckets an item type for the watchdog's liveness rules.
+func classifyItem(itemType string) agent.ItemKind {
+	switch itemType {
+	case "command_execution":
+		return agent.KindCommand
+	case "mcp_tool_call", "dynamic_tool_call", "web_search":
+		return agent.KindTool
+	default:
+		return agent.KindOther
+	}
+}
+
+// itemLabel is a short human label for an in-flight item, used in kill reasons.
+func itemLabel(it *Item) string {
+	switch it.Type {
+	case "command_execution":
+		return shorten(it.Command, 60)
+	case "mcp_tool_call":
+		return it.Server + "/" + it.Tool
+	case "dynamic_tool_call":
+		return it.Tool
+	case "web_search":
+		return shorten(it.Query, 60)
+	default:
+		return it.Type
 	}
 }
 
@@ -182,7 +188,7 @@ func looksLikeVerification(cmd string) bool {
 	return false
 }
 
-func usageSuffix(u *Usage) string {
+func usageSuffix(u *agent.Usage) string {
 	if u == nil {
 		return ""
 	}

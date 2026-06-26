@@ -1,10 +1,10 @@
-// Package job owns the on-disk representation of a monitored Codex run.
+// Package job owns the on-disk representation of a monitored agent run.
 //
 // Every run gets a directory under the codexmon home (default ~/.codexmon/jobs/<id>):
 //
-//	spec.json     immutable launch spec (args, cwd, thresholds) read by the worker
+//	spec.json     immutable launch spec (agent, args, cwd, thresholds) read by the worker
 //	status.json   live status, rewritten by the monitor at least once per second
-//	events.jsonl  raw `codex exec --json` event lines (when JSON monitoring is on)
+//	events.jsonl  raw agent event-stream lines (when JSON monitoring is on)
 //	output.log    merged human-readable stdout/stderr log
 //	result.txt    final agent message / review output
 //	cancel        marker file; its presence asks the monitor to stop
@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tigercosmos/codexmon/internal/events"
+	"github.com/tigercosmos/codexmon/internal/agent"
 	"github.com/tigercosmos/codexmon/internal/proc"
 )
 
@@ -75,13 +75,14 @@ type Status struct {
 	Health Health `json:"health"`
 	Phase  string `json:"phase"`
 
-	CodexBin string   `json:"codex_bin"`
-	Args     []string `json:"args"` // args passed to codex
+	Agent    string   `json:"agent"`     // which agent ran (codex/claude/cursor)
+	AgentBin string   `json:"agent_bin"` // resolved path to the agent binary
+	Args     []string `json:"args"`      // args passed to the agent
 	Cwd      string   `json:"cwd"`
-	JSONMode bool     `json:"json_mode"` // true when monitoring the --json event stream
+	JSONMode bool     `json:"json_mode"` // true when monitoring the JSON event stream
 
-	WorkerPID int `json:"worker_pid"` // process that owns the codex child
-	CodexPID  int `json:"codex_pid"`  // codex process group leader
+	WorkerPID int `json:"worker_pid"` // process that owns the agent child
+	AgentPID  int `json:"agent_pid"`  // agent process group leader
 
 	StartedAt   time.Time  `json:"started_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
@@ -91,10 +92,10 @@ type Status struct {
 	ElapsedSec float64 `json:"elapsed_sec"`
 	IdleSec    float64 `json:"idle_sec"`
 
-	EventCount int           `json:"event_count"`
-	LastEvent  string        `json:"last_event"`
-	ThreadID   string        `json:"thread_id,omitempty"`
-	Usage      *events.Usage `json:"usage,omitempty"`
+	EventCount int          `json:"event_count"`
+	LastEvent  string       `json:"last_event"`
+	ThreadID   string       `json:"thread_id,omitempty"`
+	Usage      *agent.Usage `json:"usage,omitempty"`
 
 	ExitCode *int   `json:"exit_code,omitempty"`
 	Error    string `json:"error,omitempty"`
@@ -117,14 +118,19 @@ type Status struct {
 // Spec is the immutable launch description persisted for the detached worker.
 type Spec struct {
 	ID           string     `json:"id"`
-	CodexBin     string     `json:"codex_bin"`
+	Agent        string     `json:"agent"`     // which agent to run (codex/claude/cursor)
+	AgentBin     string     `json:"agent_bin"` // resolved path to the agent binary
 	Args         []string   `json:"args"`
 	Cwd          string     `json:"cwd"`
 	JSONMode     bool       `json:"json_mode"`
 	ForwardStdin bool       `json:"forward_stdin"`
 	Thresholds   Thresholds `json:"thresholds"`
 	Title        string     `json:"title"`
-	Env          []string   `json:"env,omitempty"`
+	// Env, when non-empty, fully REPLACES the agent's environment (it is not
+	// merged with the parent's). codexmon never sets it — the agent inherits the
+	// launcher's environment — so it exists only for tests/advanced use; a
+	// hand-edited spec.json that sets it must include PATH/HOME/etc.
+	Env []string `json:"env,omitempty"`
 }
 
 // Home returns the codexmon home directory ($CODEXMON_HOME or ~/.codexmon).
@@ -206,6 +212,13 @@ func writeJSONAtomic(path string, v any) error {
 		return err
 	}
 	tmpName := tmp.Name()
+	// os.CreateTemp already uses 0600, but pin it explicitly: job records can
+	// hold prompts and review output, which must not be briefly world-readable.
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
@@ -264,7 +277,22 @@ func ReadStatus(dir string) (*Status, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, err
 	}
+	wasActive := s.State.Active()
+	workerDead := s.WorkerPID > 0 && !proc.Alive(s.WorkerPID)
 	reconcileLiveness(&s)
+	if wasActive && !s.State.Active() {
+		// The job just reconciled to terminal because its worker is gone or
+		// wedged — two cleanups the dead worker can no longer perform itself:
+		//   1. reap an agent process group it orphaned (only when the worker is
+		//      definitively dead, and only if that pid is still alive, to avoid
+		//      killing a reused pid), and
+		//   2. persist the terminal status so anything reading status.json
+		//      directly — not just through this function — sees the real state.
+		if workerDead && s.AgentPID > 0 && proc.Alive(s.AgentPID) {
+			proc.TerminateGroup(s.AgentPID, 2*time.Second)
+		}
+		_ = writeJSONAtomic(statusPath, &s) // best effort; a read must still return
+	}
 	return &s, nil
 }
 

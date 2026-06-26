@@ -1,6 +1,10 @@
-package events
+package codex
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/tigercosmos/codexmon/internal/agent"
+)
 
 func TestParseValidEvents(t *testing.T) {
 	cases := []struct {
@@ -49,21 +53,21 @@ func TestParseExtractsFields(t *testing.T) {
 func TestDescribePhases(t *testing.T) {
 	cases := []struct {
 		line      string
-		wantPhase Phase
+		wantPhase agent.Phase
 		wantSub   string // substring expected in summary
 	}{
-		{`{"type":"thread.started","thread_id":"t"}`, PhaseStarting, "thread"},
-		{`{"type":"turn.started"}`, PhaseStarting, "turn"},
-		{`{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":2}}`, PhaseCompleted, "completed"},
-		{`{"type":"turn.failed","error":{"message":"x"}}`, PhaseFailed, "failed"},
-		{`{"type":"error","message":"boom"}`, PhaseFailed, "boom"},
-		{`{"type":"item.completed","item":{"type":"agent_message","text":"the answer"}}`, PhaseWriting, "the answer"},
-		{`{"type":"item.started","item":{"type":"reasoning"}}`, PhaseThinking, "reasoning"},
-		{`{"type":"item.started","item":{"type":"command_execution","command":"ls -a"}}`, PhaseRunning, "ls -a"},
-		{`{"type":"item.started","item":{"type":"command_execution","command":"go test ./..."}}`, PhaseVerifying, "go test"},
-		{`{"type":"item.completed","item":{"type":"file_change","changes":[{"path":"a.go"},{"path":"b.go"}]}}`, PhaseEditing, "2 file"},
-		{`{"type":"item.started","item":{"type":"web_search","query":"golang context"}}`, PhaseSearching, "golang context"},
-		{`{"type":"item.started","item":{"type":"mcp_tool_call","server":"s","tool":"t"}}`, PhaseInvestigate, "s/t"},
+		{`{"type":"thread.started","thread_id":"t"}`, agent.PhaseStarting, "thread"},
+		{`{"type":"turn.started"}`, agent.PhaseStarting, "turn"},
+		{`{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":2}}`, agent.PhaseCompleted, "completed"},
+		{`{"type":"turn.failed","error":{"message":"x"}}`, agent.PhaseFailed, "failed"},
+		{`{"type":"error","message":"boom"}`, agent.PhaseFailed, "boom"},
+		{`{"type":"item.completed","item":{"type":"agent_message","text":"the answer"}}`, agent.PhaseWriting, "the answer"},
+		{`{"type":"item.started","item":{"type":"reasoning"}}`, agent.PhaseThinking, "reasoning"},
+		{`{"type":"item.started","item":{"type":"command_execution","command":"ls -a"}}`, agent.PhaseRunning, "ls -a"},
+		{`{"type":"item.started","item":{"type":"command_execution","command":"go test ./..."}}`, agent.PhaseVerifying, "go test"},
+		{`{"type":"item.completed","item":{"type":"file_change","changes":[{"path":"a.go"},{"path":"b.go"}]}}`, agent.PhaseEditing, "2 file"},
+		{`{"type":"item.started","item":{"type":"web_search","query":"golang context"}}`, agent.PhaseSearching, "golang context"},
+		{`{"type":"item.started","item":{"type":"mcp_tool_call","server":"s","tool":"t"}}`, agent.PhaseInvestigate, "s/t"},
 	}
 	for _, c := range cases {
 		ev, ok := Parse(c.line)

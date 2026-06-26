@@ -16,8 +16,10 @@ import (
 )
 
 var (
-	binPath  string
-	fakePath string
+	binPath    string
+	fakePath   string
+	claudePath string
+	cursorPath string
 )
 
 const fakeCodex = `#!/bin/sh
@@ -46,6 +48,38 @@ case "$1" in
 esac
 `
 
+// fakeClaude emits a Claude Code stream-json transcript so the multi-agent
+// review path can be exercised without a real Claude install.
+const fakeClaude = `#!/bin/sh
+case "$1" in
+  --version) echo "fake-claude 9.9.9"; exit 0 ;;
+  doctor)    echo "claude: all good"; exit 0 ;;
+  *)
+    echo '{"type":"system","subtype":"init","session_id":"sess-1","model":"fake"}'
+    echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"git diff"}}]}}'
+    echo '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"diff"}]}}'
+    echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"CLAUDE_REVIEW_OK"}]}}'
+    echo '{"type":"result","subtype":"success","is_error":false,"result":"CLAUDE_REVIEW_OK","session_id":"sess-1","usage":{"input_tokens":10,"output_tokens":3}}'
+    exit 0 ;;
+esac
+`
+
+// fakeCursor emits a Cursor agent stream-json transcript.
+const fakeCursor = `#!/bin/sh
+case "$1" in
+  --version) echo "fake-cursor 2026.0.0"; exit 0 ;;
+  status)    echo "Logged in as test@example.com"; exit 0 ;;
+  *)
+    echo '{"type":"system","subtype":"init","session_id":"c-1","cwd":"/","model":"fake","permissionMode":"default"}'
+    echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"review"}]}}'
+    echo '{"type":"tool_call","subtype":"started","call_id":"k1","tool_call":{"readToolCall":{"args":{"path":"a"}}}}'
+    echo '{"type":"tool_call","subtype":"completed","call_id":"k1","tool_call":{"readToolCall":{"result":{"success":{}}}}}'
+    echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"CURSOR_REVIEW_OK"}]}}'
+    echo '{"type":"result","subtype":"success","is_error":false,"result":"CURSOR_REVIEW_OK","session_id":"c-1","duration_ms":5}'
+    exit 0 ;;
+esac
+`
+
 func TestMain(m *testing.M) {
 	if runtime.GOOS == "windows" {
 		os.Exit(0) // e2e relies on a /bin/sh fake codex
@@ -70,6 +104,14 @@ func TestMain(m *testing.M) {
 	if err := os.WriteFile(fakePath, []byte(fakeCodex), 0o755); err != nil {
 		panic(err)
 	}
+	claudePath = filepath.Join(tmp, "fakeclaude")
+	if err := os.WriteFile(claudePath, []byte(fakeClaude), 0o755); err != nil {
+		panic(err)
+	}
+	cursorPath = filepath.Join(tmp, "fakecursor")
+	if err := os.WriteFile(cursorPath, []byte(fakeCursor), 0o755); err != nil {
+		panic(err)
+	}
 
 	os.Exit(m.Run())
 }
@@ -86,6 +128,8 @@ func runCodexmon(t *testing.T, home string, extraEnv []string, args ...string) r
 	cmd.Env = append(os.Environ(),
 		"CODEXMON_HOME="+home,
 		"CODEXMON_CODEX="+fakePath,
+		"CODEXMON_CLAUDE="+claudePath,
+		"CODEXMON_CURSOR="+cursorPath,
 	)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	var out, errBuf strings.Builder
@@ -216,10 +260,10 @@ func TestE2EDeadWorkerReconciled(t *testing.T) {
 		var st struct {
 			State     string `json:"state"`
 			WorkerPID int    `json:"worker_pid"`
-			CodexPID  int    `json:"codex_pid"`
+			AgentPID  int    `json:"agent_pid"`
 		}
-		if json.Unmarshal([]byte(s.stdout), &st) == nil && st.State == "running" && st.CodexPID > 0 {
-			worker, codex = st.WorkerPID, st.CodexPID
+		if json.Unmarshal([]byte(s.stdout), &st) == nil && st.State == "running" && st.AgentPID > 0 {
+			worker, codex = st.WorkerPID, st.AgentPID
 			break
 		}
 		time.Sleep(150 * time.Millisecond)
@@ -268,6 +312,84 @@ func TestE2EDoctor(t *testing.T) {
 	}
 	if !strings.Contains(rep.Version, "fake-codex") {
 		t.Errorf("version = %q", rep.Version)
+	}
+}
+
+func TestE2EReviewMultiAgent(t *testing.T) {
+	cases := []struct {
+		agent  string
+		want   string
+		stream string // a phrase that must appear in the streamed log
+	}{
+		{"claude", "CLAUDE_REVIEW_OK", "session started"},
+		{"cursor", "CURSOR_REVIEW_OK", "session started"},
+	}
+	for _, c := range cases {
+		t.Run(c.agent, func(t *testing.T) {
+			home := t.TempDir()
+			// Background review so we exercise the detached worker path too.
+			start := runCodexmon(t, home, nil, "review", "--agent", c.agent, "--uncommitted", "-b")
+			if start.code != 0 {
+				t.Fatalf("review start exit = %d, stderr=%s", start.code, start.stderr)
+			}
+			id := firstToken(start.stdout)
+			if !strings.HasPrefix(id, "cdx-") {
+				t.Fatalf("no job id from review: %q", start.stdout)
+			}
+
+			wait := runCodexmon(t, home, nil, "wait", id, "--timeout", "20", "--json")
+			if wait.code != 0 {
+				t.Fatalf("wait exit = %d, stderr=%s out=%s", wait.code, wait.stderr, wait.stdout)
+			}
+			var st struct {
+				State         string `json:"state"`
+				Agent         string `json:"agent"`
+				JSONMode      bool   `json:"json_mode"`
+				ResultPreview string `json:"result_preview"`
+			}
+			if err := json.Unmarshal([]byte(wait.stdout), &st); err != nil {
+				t.Fatalf("wait json: %v\n%s", err, wait.stdout)
+			}
+			if st.State != "completed" {
+				t.Errorf("state = %s, want completed\n%s", st.State, wait.stdout)
+			}
+			if st.Agent != c.agent {
+				t.Errorf("agent = %q, want %q", st.Agent, c.agent)
+			}
+			if !st.JSONMode {
+				t.Errorf("review should be json-monitored for %s", c.agent)
+			}
+			if !strings.Contains(st.ResultPreview, c.want) {
+				t.Errorf("result = %q, want %q", st.ResultPreview, c.want)
+			}
+
+			tail := runCodexmon(t, home, nil, "tail", id)
+			if !strings.Contains(tail.stdout, c.stream) {
+				t.Errorf("log should show streamed events:\n%s", tail.stdout)
+			}
+		})
+	}
+}
+
+func TestE2EDoctorMultiAgent(t *testing.T) {
+	for _, agent := range []string{"claude", "cursor"} {
+		t.Run(agent, func(t *testing.T) {
+			home := t.TempDir()
+			r := runCodexmon(t, home, nil, "doctor", "--agent", agent, "--json")
+			if r.code != 0 {
+				t.Fatalf("doctor exit = %d, stderr=%s out=%s", r.code, r.stderr, r.stdout)
+			}
+			var rep struct {
+				Ready bool   `json:"ready"`
+				Agent string `json:"agent"`
+			}
+			if err := json.Unmarshal([]byte(r.stdout), &rep); err != nil {
+				t.Fatalf("doctor json: %v\n%s", err, r.stdout)
+			}
+			if !rep.Ready || rep.Agent != agent {
+				t.Errorf("doctor %s = %+v\n%s", agent, rep, r.stdout)
+			}
+		})
 	}
 }
 

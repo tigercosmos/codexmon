@@ -2,10 +2,10 @@
 
 # codexmon
 
-**A health-monitoring wrapper around the [Codex](https://github.com/openai/codex) CLI.**
+**A health-monitoring wrapper around AI coding CLIs — [Codex](https://github.com/openai/codex), [Claude Code](https://github.com/anthropics/claude-code), and the [Cursor agent](https://cursor.com/docs/cli).**
 
-*Run `codex` and always know whether it's healthy, slow, stalled, or done —
-so a review can never hang silently again.*
+*Run any of them and always know whether it's healthy, slow, stalled, or done —
+so a code review can never hang silently again.*
 
 [![CI](https://github.com/tigercosmos/codexmon/actions/workflows/ci.yml/badge.svg)](https://github.com/tigercosmos/codexmon/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/tigercosmos/codexmon.svg)](https://pkg.go.dev/github.com/tigercosmos/codexmon)
@@ -22,12 +22,18 @@ so a review can never hang silently again.*
 
 ---
 
-`codexmon` forwards your arguments straight through to `codex`, but supervises
-the process so a caller — a human, or an agent like Claude Code — can observe
-its liveness at any moment and bound how long it may run. It turns the opaque
-"`codex review` is just sitting there… is it working or wedged?" experience into
-a continuously-updated status you can poll, with heartbeats, structured JSON,
-and a watchdog that stops a genuinely stuck run and tells you *why*.
+`codexmon` forwards your arguments straight through to the selected agent
+(`codex` by default; `--agent claude` or `--agent cursor` to switch), but
+supervises the process so a caller — a human, or an agent like Claude Code — can
+observe its liveness at any moment and bound how long it may run. It turns the
+opaque "the review is just sitting there… is it working or wedged?" experience
+into a continuously-updated status you can poll, with heartbeats, structured
+JSON, and a watchdog that stops a genuinely stuck run and tells you *why*.
+
+It speaks each agent's own event stream — codex's `exec --json` items, Claude
+Code's `stream-json`, Cursor's `tool_call` lifecycle — and normalizes them to a
+single status model, so `codexmon review --agent <name>` looks identical no
+matter who does the reviewing.
 
 ```console
 $ codexmon start -- exec review --uncommitted
@@ -71,8 +77,9 @@ monitor itself.
 
 ## Install
 
-codexmon runs on **macOS and Linux** (arm64 / amd64) and needs the **`codex`**
-CLI on your `PATH`.
+codexmon runs on **macOS and Linux** (arm64 / amd64) and needs at least one
+supported agent CLI on your `PATH`: **`codex`** (default), **`claude`**
+(Claude Code), and/or **`cursor-agent`** (Cursor).
 
 **Prebuilt binary** — grab the archive for your OS/arch from the
 [latest release](https://github.com/tigercosmos/codexmon/releases/latest)
@@ -80,7 +87,7 @@ CLI on your `PATH`.
 
 ```sh
 # example: macOS (Apple Silicon) — substitute your version/os/arch
-curl -sSL https://github.com/tigercosmos/codexmon/releases/download/v0.1.0/codexmon_0.1.0_darwin_arm64.tar.gz \
+curl -sSL https://github.com/tigercosmos/codexmon/releases/download/v0.2.0/codexmon_0.2.0_darwin_arm64.tar.gz \
   | tar -xz codexmon && sudo mv codexmon /usr/local/bin/
 codexmon version
 ```
@@ -115,6 +122,10 @@ codexmon doctor
 # Foreground: run codex with live heartbeats on stderr, result on stdout
 codexmon exec review --uncommitted
 
+# Same review, but run by a different agent — identical command, just --agent:
+codexmon review --agent claude --uncommitted
+codexmon review --agent cursor --base main
+
 # Background: launch detached, then poll — never blocks your shell
 ID=$(codexmon start -- exec review --base main | head -1 | awk '{print $1}')
 codexmon status "$ID"          # health at a glance
@@ -122,49 +133,69 @@ codexmon tail   "$ID" -f       # follow the log
 codexmon wait   "$ID"          # block until done, print the result
 ```
 
+> **Picking the agent.** `--agent codex|claude|cursor` (on `run`/`start`/
+> `review`/`doctor`/`version`) or the `CODEXMON_AGENT` env var selects who runs;
+> the default is `codex`, so every existing command keeps working unchanged.
+
 ## Commands
 
 codexmon is a transparent front-end: **anything that isn't a codexmon
-subcommand is passed to `codex` verbatim**, wrapped in monitoring.
+subcommand is passed to the selected agent verbatim**, wrapped in monitoring.
 
 | Command | Description |
 |---|---|
-| `codexmon <codex args…>` | Run codex in the **foreground** with monitoring (implicit `run`) |
-| `codexmon run [flags] [--] <codex args>` | Foreground run, with explicit monitor flags |
-| `codexmon start [flags] [--] <codex args>` | Launch **detached**; prints a job id to poll |
+| `codexmon <agent args…>` | Run the agent in the **foreground** with monitoring (implicit `run`) |
+| `codexmon run [flags] [--] <agent args>` | Foreground run, with explicit monitor flags |
+| `codexmon start [flags] [--] <agent args>` | Launch **detached**; prints a job id to poll |
+| `codexmon review [flags]` | Monitored **code review** on any agent: `--uncommitted` (default) or `--base REF` |
 | `codexmon status [id] [--json]` | Health/status of a job (latest if `id` omitted) |
 | `codexmon wait [id] [--timeout S] [--json]` | Block until a job finishes, then print the result |
 | `codexmon tail [id] [-f] [-n N]` | Show (or follow) a job's log |
 | `codexmon list [--json]` | List recent jobs |
 | `codexmon cancel [id]` | Stop a running job |
-| `codexmon doctor [--json]` | Check that codex itself is installed and responding |
-| `codexmon version` | Print codexmon and codex versions |
+| `codexmon doctor [--agent A] [--json]` | Check that the agent is installed and responding |
+| `codexmon version [--agent A]` | Print codexmon and agent versions |
 
-When the codex subcommand is `exec` (or its alias `e`, including `exec review`),
-codexmon auto-injects `--json` to monitor the event stream and
-`--output-last-message` to reliably capture the final answer. Use `--no-json`
-to opt out. For any other codex subcommand it falls back to monitoring raw
-stdout/stderr activity.
+`codexmon review` is the agent-neutral path: it builds each agent's native review
+invocation for you (codex's `exec review`, a read-only review prompt for Claude
+Code / Cursor) so the same command works everywhere. For full control, pass
+agent-native args yourself via `run`/`start`.
 
-### Monitor flags (`run` / `start`)
+> **claude/cursor reviews are hardened but not sandboxed.** codex has a native
+> read-only reviewer. Claude Code needs `bypassPermissions` to use tools
+> headlessly, so `review` additionally **denies the file-editing tools**
+> (`Edit`/`Write`/`MultiEdit`/`NotebookEdit`) and prompts it to stay read-only;
+> Cursor runs in print mode without auto-approving mutations. A determined shell
+> write is still possible, so run on a clean working tree if that matters.
+
+codexmon auto-injects each agent's event-stream and result-capture flags so the
+run is observable: `--json` + `--output-last-message` for `codex exec`,
+`--output-format stream-json --verbose` for `claude -p`, and
+`--output-format stream-json` for `cursor-agent -p`. Use `--no-json` to opt out;
+without a parseable stream, codexmon falls back to monitoring raw stdout/stderr
+activity.
+
+### Monitor flags (`run` / `start` / `review`)
 
 | Flag | Default | Meaning |
 |---|---|---|
+| `--agent NAME` | `codex` | Which agent runs: `codex`, `claude`, or `cursor` (or set `CODEXMON_AGENT`) |
 | `-b, --background` | off | Detach and return a job id immediately |
 | `--wall-timeout S` | `600` | Hard wall-clock limit, seconds (`0` = off) |
 | `--idle-timeout S` | `180` | Kill after S idle seconds **when nothing is in flight** (`0` = off) |
 | `--tool-timeout S` | `120` | Kill if a single MCP/tool call runs longer than S seconds (`0` = off) |
 | `--slow-after S` | `30` | Flag health as `slow` after S idle seconds |
 | `--heartbeat S` | `10` | Heartbeat cadence, seconds |
-| `-C, --cwd DIR` | cwd | Working directory for codex |
-| `--stdin` | off | Forward codexmon's stdin to codex (default: `/dev/null`) |
-| `--no-json` | off | Don't inject `exec --json` event monitoring |
-| `--codex-bin PATH` | `codex` | Path to the codex binary (or set `CODEXMON_CODEX`) |
+| `-C, --cwd DIR` | cwd | Working directory for the agent |
+| `--stdin` | off | Forward codexmon's stdin to the agent (default: `/dev/null`) |
+| `--no-json` | off | Don't inject JSON event-stream monitoring |
+| `--agent-bin PATH` | agent default | Path to the agent binary (or set its `CODEXMON_*` var; `--codex-bin` still accepted) |
 | `--json` | off | Emit machine-readable JSON instead of human text |
 
-> Monitor flags must come **before** the codex subcommand, or after a `--`
-> separator. Everything from the codex subcommand onward is passed to codex
-> untouched: `codexmon start --wall-timeout 900 -- exec review --uncommitted`.
+> For `run`/`start`, monitor flags must come **before** the agent subcommand, or
+> after a `--` separator; everything from the subcommand onward is passed to the
+> agent untouched: `codexmon start --agent claude --wall-timeout 900 -- -p "Review the diff"`.
+> `review` takes only the flags above plus `--uncommitted` / `--base REF`.
 
 ## The watchdog (what makes it "monitoring")
 
@@ -203,7 +234,7 @@ its status file goes stale, `status`/`wait`/`list` **reconcile** the job to
 | Code | Meaning |
 |---|---|
 | `0` | completed |
-| `1` | failed (or codex's own non-zero exit) |
+| `1` | failed (the agent's own non-zero exit is forwarded verbatim unless it would collide with a sentinel below, in which case it becomes `1`) |
 | `124` | stalled or wall-clock timeout |
 | `130` | cancelled |
 | `75` | `wait`'s own `--timeout` elapsed while the job was still running |
@@ -230,6 +261,10 @@ phase, elapsed/idle seconds, last event, token usage, result preview — so an
 agent can branch on the outcome without parsing prose. To skip permission
 prompts, allow `Bash(codexmon:*)` in `.claude/settings.json`.
 
+The contract is identical whichever agent does the work, so a Claude Code loop
+can delegate a review to a *different* model with one flag — e.g.
+`codexmon review --agent cursor --uncommitted` — and read back the same JSON.
+
 **Drop-in agent skill.** [`skills/codexmon/SKILL.md`](skills/codexmon/SKILL.md)
 is a ready-made skill that teaches an agent the whole loop above. `make install`
 installs it automatically; to (re)install just the skill:
@@ -241,7 +276,7 @@ cp -r skills/codexmon ~/.claude/skills/        # user-wide
 cp -r skills/codexmon .claude/skills/          # project-local
 ```
 
-> **Tip:** if a review stalls on an MCP tool that's configured in
+> **Tip (codex):** if a review stalls on an MCP tool that's configured in
 > `~/.codex/config.toml`, you can run it MCP-free with
 > `codexmon exec review --uncommitted --ignore-user-config` (codex still uses
 > your auth). Without that, codexmon will correctly report `stalled` (exit 124)
@@ -252,15 +287,24 @@ cp -r skills/codexmon .claude/skills/          # project-local
 | Env var | Purpose |
 |---|---|
 | `CODEXMON_HOME` | State directory (default `~/.codexmon`) |
-| `CODEXMON_CODEX` | Path to the codex binary (overrides `PATH`) |
+| `CODEXMON_AGENT` | Default agent when `--agent` is omitted (`codex`/`claude`/`cursor`) |
+| `CODEXMON_CODEX` | Path to the `codex` binary (overrides `PATH`) |
+| `CODEXMON_CLAUDE` | Path to the `claude` binary (overrides `PATH`) |
+| `CODEXMON_CURSOR` | Path to the `cursor-agent` binary (overrides `PATH`) |
+
+(Cursor also needs `CURSOR_API_KEY` for non-interactive use — codexmon passes
+your environment through to the agent.)
+
+> `CODEXMON_CODEX`/`CLAUDE`/`CURSOR` and `--agent-bin` run whatever executable you
+> point them at — only set them to a binary you trust.
 
 Each run gets `~/.codexmon/jobs/<id>/` (created `0700`; files `0600`, since
 prompts and output can be sensitive):
 
 ```
-spec.json      immutable launch spec (args, cwd, thresholds)
+spec.json      immutable launch spec (agent, args, cwd, thresholds)
 status.json    live status — rewritten ~1×/second; the contract pollers read
-events.jsonl   raw `codex exec --json` events
+events.jsonl   raw agent event-stream lines (when JSON monitoring is on)
 output.log     merged human-readable log (events, stderr, heartbeats)
 result.txt     final agent message / review output
 ```
@@ -268,21 +312,26 @@ result.txt     final agent message / review output
 ## How it works
 
 ```
-┌─ codexmon run/start ─────────────────────────────────────────────┐
-│  analyze args → inject `exec --json` / `-o`  (internal/codexcli)  │
-│  spawn codex in its own process group        (internal/proc)     │
-│  ├─ read stdout: parse JSONL events           (internal/events)  │
-│  ├─ read stderr: capture diagnostics                             │
-│  ├─ watchdog 1Hz: health + tool/idle/wall/cancel                 │
-│  └─ wait on the *process* (not pipe EOF) ── authoritative exit   │
-│  write status.json atomically each tick      (internal/job)      │
-└──────────────────────────────────────────────────────────────────┘
+┌─ codexmon run/start/review ──────────────────────────────────────────┐
+│  pick agent.Provider (codex/claude/cursor)   (internal/agent)        │
+│  analyze args → inject the agent's stream/result flags  (provider)   │
+│  spawn the agent in its own process group    (internal/proc)         │
+│  ├─ read stdout: provider.ParseLine → normalized Event (provider)    │
+│  ├─ read stderr: capture diagnostics                                 │
+│  ├─ watchdog 1Hz: health + tool/idle/wall/cancel                     │
+│  └─ wait on the *process* (not pipe EOF) ── authoritative exit       │
+│  write status.json atomically each tick      (internal/job)          │
+└──────────────────────────────────────────────────────────────────────┘
         status / wait / tail / list / cancel  poll those files
 ```
 
 `start` re-execs codexmon as a detached `__worker` (its own session) so the run
 survives the launching shell; the worker runs the exact same monitor and writes
 to the same job files.
+
+Adding a new agent is one self-contained package: implement `agent.Provider`
+(locate the binary, shape the args, parse the stream, health-check) and register
+it. The supervisor, CLI, and watchdog never change.
 
 ## Development
 
@@ -294,22 +343,26 @@ make lint          # gofmt + go vet + staticcheck
 make cover         # coverage summary
 ```
 
-Tests use a **fake `codex` shell script**, so the whole suite — including the
-end-to-end tests in `e2e/` that build the real binary and drive detached
-background workers — runs with no network access or Codex auth.
+Tests use **fake agent shell scripts** (codex, claude, and cursor), so the whole
+suite — including the end-to-end tests in `e2e/` that build the real binary and
+drive detached background workers across every agent — runs with no network
+access or any agent's auth.
 
 ### Layout
 
 ```
-cmd/codexmon          entrypoint
-internal/cli          argument routing & subcommands
-internal/monitor      the supervisor: spawn, stream, watchdog, status
-internal/events       codex `exec --json` event parsing
-internal/job          on-disk job records (spec/status/log/result)
-internal/codexcli     locate codex; analyze args; inject --json
-internal/proc         process-group lifecycle (stdin guard, group kill)
-internal/render       human-readable status/result formatting
-e2e                   end-to-end tests against a fake codex
+cmd/codexmon              entrypoint
+internal/cli              argument routing & subcommands (incl. review, --agent)
+internal/monitor          the supervisor: spawn, stream, watchdog, status
+internal/agent            the Provider contract + normalized Event/Phase/Usage + registry
+internal/agent/codex      codex provider: locate, analyze args, parse `exec --json`
+internal/agent/claude     Claude Code provider: -p + stream-json parsing
+internal/agent/cursor     Cursor provider: -p + stream-json parsing
+internal/agent/all        blank-imported to register the built-in providers
+internal/job              on-disk job records (spec/status/log/result)
+internal/proc             process-group lifecycle (stdin guard, group kill)
+internal/render           human-readable status/result formatting
+e2e                       end-to-end tests against fake codex/claude/cursor
 ```
 
 ### Releasing
@@ -318,7 +371,7 @@ Releases are cut by GoReleaser from a version tag, via
 [`.github/workflows/release.yml`](.github/workflows/release.yml):
 
 ```sh
-git tag v0.1.0 && git push origin v0.1.0     # CI builds + publishes the release
+git tag v0.2.0 && git push origin v0.2.0     # CI builds + publishes the release
 ```
 
 To build the same cross-platform archives locally (no goreleaser required):

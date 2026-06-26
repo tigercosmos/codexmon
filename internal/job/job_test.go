@@ -1,13 +1,14 @@
 package job
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/tigercosmos/codexmon/internal/events"
+	"github.com/tigercosmos/codexmon/internal/agent"
 )
 
 func TestNewIDFormat(t *testing.T) {
@@ -32,7 +33,7 @@ func TestStatusRoundTrip(t *testing.T) {
 	in := &Status{
 		ID: id, State: StateCompleted, Health: HealthDone, Phase: "completed",
 		Args: []string{"exec", "review"}, ExitCode: &ec,
-		Usage:      &events.Usage{InputTokens: 10, OutputTokens: 2},
+		Usage:      &agent.Usage{InputTokens: 10, OutputTokens: 2},
 		Thresholds: Thresholds{WallSec: 600},
 		StartedAt:  time.Now(),
 	}
@@ -55,7 +56,7 @@ func TestStatusRoundTrip(t *testing.T) {
 func TestSpecRoundTrip(t *testing.T) {
 	t.Setenv("CODEXMON_HOME", t.TempDir())
 	dir, _ := Dir(NewID())
-	in := &Spec{ID: "x", CodexBin: "/bin/codex", Args: []string{"exec", "--json"}, JSONMode: true, Thresholds: Thresholds{WallSec: 60}}
+	in := &Spec{ID: "x", Agent: "codex", AgentBin: "/bin/codex", Args: []string{"exec", "--json"}, JSONMode: true, Thresholds: Thresholds{WallSec: 60}}
 	if err := WriteSpec(dir, in); err != nil {
 		t.Fatal(err)
 	}
@@ -159,6 +160,40 @@ func TestReconcileDeadWorker(t *testing.T) {
 	}
 	if st.Error == "" {
 		t.Error("reconciled job should explain why")
+	}
+}
+
+func TestReconcilePersistsTerminalState(t *testing.T) {
+	t.Setenv("CODEXMON_HOME", t.TempDir())
+	cmd := exec.Command("sh", "-c", "exit 0")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	deadPID := cmd.Process.Pid
+
+	id := NewID()
+	dir, _ := Dir(id)
+	_ = WriteStatus(dir, &Status{
+		ID: id, State: StateRunning, Health: HealthHealthy,
+		WorkerPID: deadPID, StartedAt: time.Now(),
+	})
+
+	// Reading a dead-worker job reconciles it AND persists the terminal state, so
+	// processes reading status.json directly (not via ReadStatus) see it too.
+	if st, _ := ReadStatus(dir); st.State != StateFailed {
+		t.Fatalf("reconcile returned %s, want failed", st.State)
+	}
+	_, statusPath, _, _, _, _ := Paths(dir)
+	raw, err := os.ReadFile(statusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted Status
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.State != StateFailed || persisted.EndedAt == nil {
+		t.Errorf("status.json not persisted as terminal: state=%s ended=%v", persisted.State, persisted.EndedAt)
 	}
 }
 

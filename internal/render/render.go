@@ -32,8 +32,9 @@ func Status(s *job.Status) string {
 	fmt.Fprintf(&b, "  state:    %s (%s)\n", s.State, s.Health)
 	fmt.Fprintf(&b, "  phase:    %s\n", orDash(s.Phase))
 	fmt.Fprintf(&b, "  elapsed:  %s   idle: %s\n", dur(s.ElapsedSec), dur(s.IdleSec))
-	if s.CodexPID != 0 {
-		fmt.Fprintf(&b, "  pid:      codex=%d worker=%d (codex alive: %t)\n", s.CodexPID, s.WorkerPID, codexAlive(s))
+	if s.AgentPID != 0 {
+		name := agentName(s)
+		fmt.Fprintf(&b, "  pid:      %s=%d worker=%d (%s alive: %t)\n", name, s.AgentPID, s.WorkerPID, name, agentAlive(s))
 	}
 	if s.EventCount > 0 {
 		fmt.Fprintf(&b, "  events:   %d\n", s.EventCount)
@@ -66,11 +67,20 @@ func Status(s *job.Status) string {
 	return b.String()
 }
 
-// codexAlive actually probes the OS for the codex process rather than echoing
+// agentAlive actually probes the OS for the agent process rather than echoing
 // the recorded state, so a status block never claims a dead process is live.
 // Terminal jobs always report false (their pid may have been recycled).
-func codexAlive(s *job.Status) bool {
-	return s.State.Active() && s.CodexPID > 0 && proc.Alive(s.CodexPID)
+func agentAlive(s *job.Status) bool {
+	return s.State.Active() && s.AgentPID > 0 && proc.Alive(s.AgentPID)
+}
+
+// agentName is the agent label for a status block, defaulting to a neutral word
+// for older job records written before the agent field existed.
+func agentName(s *job.Status) string {
+	if s.Agent != "" {
+		return s.Agent
+	}
+	return "agent"
 }
 
 // Line renders a compact one-line summary for list views.
