@@ -4,6 +4,19 @@ All notable changes to codexmon are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor versions may change
 behavior).
 
+## v0.3.0
+
+Cursor reviews now run on a known model by default instead of Cursor's
+server-side `auto` selection.
+
+### Changed
+
+- Cursor runs default to **Composer 2.5** (`--model composer-2.5`) unless the
+  caller passes their own `--model`. The flag is injected before any `--` prompt
+  terminator, and an existing `--model` is detected only among the real options
+  (not inside the prompt), so a dash-prefixed prompt is never polluted.
+  Previously codexmon set no model and left Cursor on `auto`.
+
 ## v0.2.0
 
 Multi-agent support: codexmon now monitors **codex** (default), **Claude Code**,
