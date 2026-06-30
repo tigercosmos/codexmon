@@ -98,6 +98,67 @@ func TestAnalyzeAndReview(t *testing.T) {
 	}
 }
 
+func TestAnalyzeDefaultsModel(t *testing.T) {
+	// No --model: codexmon defaults to Composer 2.5.
+	a := Provider{}.Analyze([]string{"-p", "review"}, "", true)
+	if v, present := flagValue(a.Args, "--model"); !present || v != "composer-2.5" {
+		t.Errorf("default model = %q present=%v, want composer-2.5", v, present)
+	}
+
+	// Caller-specified model wins; codexmon must not append a second --model.
+	a = Provider{}.Analyze([]string{"-p", "review", "--model", "gpt-5"}, "", true)
+	if v, _ := flagValue(a.Args, "--model"); v != "gpt-5" {
+		t.Errorf("explicit model = %q, want gpt-5", v)
+	}
+	if got := strings.Count(strings.Join(a.Args, " "), "--model"); got != 1 {
+		t.Errorf("--model count = %d, want exactly 1", got)
+	}
+
+	// The --model=value form is also honored.
+	a = Provider{}.Analyze([]string{"-p", "review", "--model=sonnet-4-thinking"}, "", true)
+	if got := strings.Count(strings.Join(a.Args, " "), "--model"); got != 1 {
+		t.Errorf("--model=value count = %d, want exactly 1", got)
+	}
+}
+
+func TestAnalyzeRespectsTerminator(t *testing.T) {
+	// A `--` terminator lets a caller pass a dash-prefixed prompt. Injected
+	// flags must land before it (as options), not after it (as prompt text).
+	a := Provider{}.Analyze([]string{"-p", "--", "-dash-prompt"}, "", true)
+	dd := indexOf(a.Args, "--")
+	mi := indexOf(a.Args, "--model")
+	oi := indexOf(a.Args, "--output-format")
+	if dd < 0 || mi < 0 || oi < 0 {
+		t.Fatalf("missing flags in %v", a.Args)
+	}
+	if mi > dd || oi > dd {
+		t.Errorf("injected flags must precede the `--` terminator: %v", a.Args)
+	}
+	if a.Args[len(a.Args)-1] != "-dash-prompt" {
+		t.Errorf("prompt operand should stay last: %v", a.Args)
+	}
+
+	// A literal --model sitting inside the prompt (after `--`) is not a model
+	// selection, so the default must still be injected before the terminator.
+	a = Provider{}.Analyze([]string{"-p", "--", "--model", "not-a-flag"}, "", true)
+	if got := strings.Count(strings.Join(a.Args, " "), "--model"); got != 2 {
+		t.Errorf("--model count = %d, want 2 (default + prompt literal): %v", got, a.Args)
+	}
+	if mi := indexOf(a.Args, "--model"); mi > indexOf(a.Args, "--") {
+		t.Errorf("default --model must precede the terminator: %v", a.Args)
+	}
+}
+
+// indexOf returns the position of the first arg equal to want, or -1.
+func indexOf(args []string, want string) int {
+	for i, a := range args {
+		if a == want {
+			return i
+		}
+	}
+	return -1
+}
+
 func TestDoctorNeedsStatus(t *testing.T) {
 	good := func(_ time.Duration, _ string, args ...string) (string, error) {
 		if args[0] == "--version" {

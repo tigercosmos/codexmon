@@ -175,7 +175,8 @@ run is observable: `--json` + `--output-last-message` for `codex exec`,
 `--output-format stream-json --verbose` for `claude -p`, and
 `--output-format stream-json` for `cursor-agent -p`. Use `--no-json` to opt out;
 without a parseable stream, codexmon falls back to monitoring raw stdout/stderr
-activity.
+activity. For Cursor, codexmon also defaults `--model composer-2.5` (Composer
+2.5) unless you pass your own `--model`.
 
 ### Monitor flags (`run` / `start` / `review`)
 

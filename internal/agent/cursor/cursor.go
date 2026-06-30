@@ -1,6 +1,7 @@
 // Package cursor adapts the Cursor agent CLI (`cursor-agent`, also installed as
 // `agent`) to codexmon's agent contract. A headless review runs
-// `cursor-agent -p "<prompt>"`; codexmon adds `--output-format stream-json` and
+// `cursor-agent -p "<prompt>"`; codexmon adds `--output-format stream-json`,
+// defaults `--model composer-2.5` (unless the caller picked a model), and
 // parses the newline-delimited event stream:
 //
 //	{"type":"system","subtype":"init","session_id":"...","model":"...","cwd":"..."}
@@ -24,6 +25,11 @@ import (
 	"github.com/tigercosmos/codexmon/internal/agent"
 )
 
+// defaultModel is the Cursor model codexmon selects when the caller hasn't
+// chosen one with --model. cursor-agent's own default is "auto" (server-side
+// selection); we pin Composer 2.5 so reviews run on a known model.
+const defaultModel = "composer-2.5"
+
 // Provider drives the Cursor agent CLI.
 type Provider struct{}
 
@@ -39,21 +45,49 @@ func (Provider) BinEnv() string { return "CODEXMON_CURSOR" }
 func (Provider) BinCandidates() []string { return []string{"cursor-agent"} }
 
 // Analyze adds the streaming-JSON flag for a headless (`-p`) run so codexmon can
-// monitor the event stream, unless the caller already chose an output format.
+// monitor the event stream, unless the caller already chose an output format. It
+// also defaults --model to Composer 2.5 unless the caller specified a model.
+//
+// Everything at or after Cursor's `--` terminator is prompt text, not options
+// (callers need it for prompts that start with `-`). So injected flags go before
+// the terminator, and existing-flag detection scans only the real options — a
+// literal `--model` sitting inside the prompt must not suppress the default.
 func (Provider) Analyze(args []string, _ string, allowJSON bool) agent.Analysis {
-	out := append([]string(nil), args...)
+	term := terminatorIndex(args)
+	opts := args[:term]
+
+	var inject []string
+	if !hasFlag(opts, "--model") {
+		inject = append(inject, "--model", defaultModel)
+	}
 	jsonMode := false
-	if allowJSON && hasFlag(args, "-p", "--print") {
-		val, present := flagValue(args, "--output-format")
+	if allowJSON && hasFlag(opts, "-p", "--print") {
+		val, present := flagValue(opts, "--output-format")
 		switch {
 		case !present:
-			out = append(out, "--output-format", "stream-json")
+			inject = append(inject, "--output-format", "stream-json")
 			jsonMode = true
 		case val == "stream-json":
 			jsonMode = true
 		}
 	}
+
+	out := make([]string, 0, len(args)+len(inject))
+	out = append(out, args[:term]...)
+	out = append(out, inject...)
+	out = append(out, args[term:]...)
 	return agent.Analysis{JSONMode: jsonMode, Args: out, Title: "cursor"}
+}
+
+// terminatorIndex returns the index of Cursor's first `--` argument separator,
+// or len(args) if there is none. Args at or after it are prompt operands.
+func terminatorIndex(args []string) int {
+	for i, a := range args {
+		if a == "--" {
+			return i
+		}
+	}
+	return len(args)
 }
 
 // ReviewArgs runs a headless review with a constructed read-only prompt. Print
