@@ -4,7 +4,7 @@ All notable changes to codexmon are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor versions may change
 behavior).
 
-## Unreleased
+## v0.4.0
 
 Retention for the jobs directory, a snappier `wait`, and a one-call JSON
 result.
