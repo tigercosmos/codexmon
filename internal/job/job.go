@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -103,6 +104,14 @@ type Status struct {
 	// ResultPreview is a truncated copy of the final output for at-a-glance
 	// status; the full text lives in result.txt (ResultFile).
 	ResultPreview string `json:"result_preview,omitempty"`
+
+	// Result is the final output, capped at 4 MiB — past the cap it ends with
+	// a truncation notice naming ResultFile, which always holds the full text.
+	// It is never persisted in status.json (the file is rewritten every
+	// second; ResultFile holds the text once) — the CLI fills it from
+	// ResultFile when emitting terminal JSON for wait/run, so a consumer gets
+	// the whole answer in one call.
+	Result string `json:"result,omitempty"`
 
 	Thresholds Thresholds `json:"thresholds"`
 
@@ -405,6 +414,152 @@ func Resolve(id string) (*Status, error) {
 		return nil, err
 	}
 	return st, nil
+}
+
+// ---- retention ---------------------------------------------------------------
+
+// Default retention: terminal jobs older than this, or beyond this many, are
+// pruned. Active jobs are never touched.
+const (
+	defaultKeepAge   = 7 * 24 * time.Hour
+	defaultKeepCount = 200
+)
+
+// unreadableGrace is the minimum age (by dir mtime) before a job directory with
+// no readable status may be pruned. A launch writes its seed status within
+// milliseconds of creating the directory, so anything past this grace is
+// crashed-launch debris, not a run in progress.
+const unreadableGrace = 10 * time.Minute
+
+// PruneOptions bound which terminal jobs Prune removes. A zero or negative
+// limit disables that dimension; All removes every terminal job regardless.
+type PruneOptions struct {
+	MaxAge   time.Duration // remove terminal jobs that ended longer ago than this
+	MaxCount int           // keep at most this many terminal jobs (newest first)
+	All      bool          // remove all terminal jobs
+}
+
+// DefaultPruneOptions returns the retention policy: the defaults above,
+// overridable via CODEXMON_KEEP_DAYS and CODEXMON_KEEP_JOBS (0 disables that
+// limit; non-numeric or negative values are ignored).
+func DefaultPruneOptions() PruneOptions {
+	opts := PruneOptions{MaxAge: defaultKeepAge, MaxCount: defaultKeepCount}
+	if v, ok := envInt("CODEXMON_KEEP_DAYS"); ok {
+		opts.MaxAge = time.Duration(v) * 24 * time.Hour
+	}
+	if v, ok := envInt("CODEXMON_KEEP_JOBS"); ok {
+		opts.MaxCount = v
+	}
+	return opts
+}
+
+func envInt(name string) (int, bool) {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// AutoPrune applies DefaultPruneOptions. Launch paths call it best-effort so
+// the jobs directory stays bounded (logs are capped per job, but the number of
+// jobs would otherwise grow forever, and every list/status scan reads them all).
+func AutoPrune() (int, error) {
+	opts := DefaultPruneOptions()
+	if opts.MaxAge <= 0 && opts.MaxCount <= 0 {
+		return 0, nil
+	}
+	return Prune(opts)
+}
+
+// Prune deletes old terminal job directories and returns how many were
+// removed. Active (queued/running) jobs are never removed — a status that
+// *claims* active but whose worker is dead reconciles to terminal via
+// ReadStatus first, so it ages out like any other finished job. A directory
+// with no readable status (half-initialized or corrupt) is removed once its
+// mtime is older than MaxAge, so a crashed launch cannot linger forever.
+func Prune(opts PruneOptions) (removed int, err error) {
+	root, err := jobsRoot()
+	if err != nil {
+		return 0, err
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	now := time.Now()
+	type ended struct {
+		dir string
+		at  time.Time
+	}
+	var terminal []ended
+	for _, e := range entries {
+		// Only touch well-formed job dirs, never a foreign file or directory
+		// something else placed under the jobs root.
+		if !e.IsDir() || !ValidID(e.Name()) {
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+		st, rerr := ReadStatus(dir)
+		if rerr != nil {
+			// No readable status — either a launch still inside its dir-created →
+			// status-written window, or debris from a crashed one. Never remove it
+			// younger than the grace age (not even for --all), so pruning cannot
+			// race a concurrent launch.
+			age := unreadableGrace
+			if !opts.All {
+				if opts.MaxAge <= 0 {
+					continue
+				}
+				age = max(opts.MaxAge, unreadableGrace)
+			}
+			if dirOlderThan(dir, now, age) && os.RemoveAll(dir) == nil {
+				removed++
+			}
+			continue
+		}
+		if st.State.Active() {
+			continue
+		}
+		terminal = append(terminal, ended{dir: dir, at: endedTime(st)})
+	}
+	sort.Slice(terminal, func(i, j int) bool { return terminal[i].at.After(terminal[j].at) })
+	for i, t := range terminal {
+		drop := opts.All ||
+			(opts.MaxAge > 0 && now.Sub(t.at) > opts.MaxAge) ||
+			(opts.MaxCount > 0 && i >= opts.MaxCount)
+		if drop && os.RemoveAll(t.dir) == nil {
+			removed++
+		}
+	}
+	return removed, nil
+}
+
+// endedTime is when a terminal job finished, with fallbacks for statuses that
+// predate EndedAt or were reconciled without one.
+func endedTime(s *Status) time.Time {
+	if s.EndedAt != nil {
+		return *s.EndedAt
+	}
+	if !s.UpdatedAt.IsZero() {
+		return s.UpdatedAt
+	}
+	return s.StartedAt
+}
+
+func dirOlderThan(dir string, now time.Time, age time.Duration) bool {
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return false
+	}
+	return now.Sub(fi.ModTime()) > age
 }
 
 // RequestCancel writes the cancel marker the monitor polls for.

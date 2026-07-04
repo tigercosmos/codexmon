@@ -36,6 +36,22 @@ case "$1" in
       stall)
         echo '{"type":"thread.started","thread_id":"t-fake"}'
         sleep 30 ;;
+      quick)
+        echo '{"type":"thread.started","thread_id":"t-fake"}'
+        echo '{"type":"turn.started"}'
+        sleep 0.3
+        echo '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"FAKE_RESULT_OK"}}'
+        echo '{"type":"turn.completed","usage":{"input_tokens":5,"cached_input_tokens":0,"output_tokens":2,"reasoning_output_tokens":1}}'
+        [ -n "$out" ] && printf 'FAKE_RESULT_OK' > "$out"
+        exit 0 ;;
+      bigresult)
+        echo '{"type":"thread.started","thread_id":"t-fake"}'
+        echo '{"type":"turn.started"}'
+        msg=""; i=0
+        while [ $i -lt 100 ]; do msg="${msg}0123456789"; i=$((i+1)); done
+        echo '{"type":"turn.completed","usage":{"input_tokens":5,"cached_input_tokens":0,"output_tokens":2,"reasoning_output_tokens":1}}'
+        [ -n "$out" ] && printf '%s' "$msg" > "$out"
+        exit 0 ;;
       *)
         echo '{"type":"thread.started","thread_id":"t-fake"}'
         echo '{"type":"turn.started"}'
@@ -403,6 +419,176 @@ func TestE2EVersionAndHelp(t *testing.T) {
 	if h.code != 0 || !strings.Contains(h.stdout, "USAGE") {
 		t.Errorf("help: code=%d", h.code)
 	}
+}
+
+// TestE2EWaitEmbedsFullResult proves wait --json carries the complete final
+// output as `result`, beyond the 600-char result_preview truncation.
+func TestE2EWaitEmbedsFullResult(t *testing.T) {
+	home := t.TempDir()
+	start := runCodexmon(t, home, []string{"FAKE_MODE=bigresult"}, "start", "--", "exec", "big answer")
+	id := firstToken(start.stdout)
+	if !strings.HasPrefix(id, "cdx-") {
+		t.Fatalf("no job id: %q", start.stdout)
+	}
+	wait := runCodexmon(t, home, nil, "wait", id, "--timeout", "20", "--json")
+	if wait.code != 0 {
+		t.Fatalf("wait exit = %d, stderr=%s out=%s", wait.code, wait.stderr, wait.stdout)
+	}
+	var st struct {
+		State         string `json:"state"`
+		Result        string `json:"result"`
+		ResultPreview string `json:"result_preview"`
+	}
+	if err := json.Unmarshal([]byte(wait.stdout), &st); err != nil {
+		t.Fatalf("wait json: %v\n%s", err, wait.stdout)
+	}
+	if st.State != "completed" {
+		t.Fatalf("state = %s, want completed\n%s", st.State, wait.stdout)
+	}
+	if len(st.Result) != 1000 || !strings.HasPrefix(st.Result, "0123456789") {
+		t.Errorf("result should be the full 1000-char output, got %d chars", len(st.Result))
+	}
+	if len(st.ResultPreview) >= len(st.Result) {
+		t.Errorf("preview (%d chars) should stay truncated below the full result", len(st.ResultPreview))
+	}
+
+	// status --json stays lightweight: preview only, no full result.
+	status := runCodexmon(t, home, nil, "status", id, "--json")
+	var lite struct {
+		Result string `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(status.stdout), &lite); err != nil {
+		t.Fatalf("status json: %v", err)
+	}
+	if lite.Result != "" {
+		t.Error("status --json must not embed the full result (it is the 1Hz poll)")
+	}
+}
+
+// TestE2EWaitReturnsPromptly locks in the adaptive poll: a short job must be
+// detected well before the old fixed 2s first sleep would even have woken.
+func TestE2EWaitReturnsPromptly(t *testing.T) {
+	home := t.TempDir()
+	start := runCodexmon(t, home, []string{"FAKE_MODE=quick"}, "start", "--", "exec", "quick answer")
+	id := firstToken(start.stdout)
+	if !strings.HasPrefix(id, "cdx-") {
+		t.Fatalf("no job id: %q", start.stdout)
+	}
+	began := time.Now()
+	wait := runCodexmon(t, home, nil, "wait", id, "--timeout", "20", "--json")
+	elapsed := time.Since(began)
+	if wait.code != 0 {
+		t.Fatalf("wait exit = %d, stderr=%s out=%s", wait.code, wait.stderr, wait.stdout)
+	}
+	if !strings.Contains(wait.stdout, `"state": "completed"`) {
+		t.Fatalf("job did not complete:\n%s", wait.stdout)
+	}
+	// The fake finishes ~0.3s in; adaptive polling checks at ~0.15/0.4/0.7/1.2s,
+	// so even a slow CI box detects it far inside 1.9s. The old fixed interval
+	// could not return before 2s once the job was still running at wait start.
+	if elapsed >= 1900*time.Millisecond {
+		t.Errorf("wait took %v; adaptive polling should detect a ~0.3s job well under 1.9s", elapsed)
+	}
+}
+
+// TestE2EWaitTimeoutPrecise locks in deadline clamping: --timeout must be
+// honored on time instead of overshooting by up to one full poll interval.
+func TestE2EWaitTimeoutPrecise(t *testing.T) {
+	home := t.TempDir()
+	start := runCodexmon(t, home, []string{"FAKE_MODE=stall"}, "start", "--wall-timeout", "0", "--idle-timeout", "0", "--", "exec", "go forever")
+	id := firstToken(start.stdout)
+	if !strings.HasPrefix(id, "cdx-") {
+		t.Fatalf("no job id: %q", start.stdout)
+	}
+	began := time.Now()
+	wait := runCodexmon(t, home, nil, "wait", id, "--timeout", "1", "--json")
+	elapsed := time.Since(began)
+	if wait.code != 75 {
+		t.Fatalf("wait exit = %d, want 75 (own timeout)\nstderr=%s out=%s", wait.code, wait.stderr, wait.stdout)
+	}
+	if elapsed < 900*time.Millisecond || elapsed >= 1900*time.Millisecond {
+		t.Errorf("wait --timeout 1 returned after %v; want ~1s (was up to ~3s before deadline clamping)", elapsed)
+	}
+	// Cleanup: stop the stalled job so nothing outlives the test.
+	runCodexmon(t, home, nil, "cancel", id)
+}
+
+// TestE2EClean drives the retention command end-to-end: finished jobs are
+// removed, active ones survive.
+func TestE2EClean(t *testing.T) {
+	home := t.TempDir()
+	// One finished job.
+	done := runCodexmon(t, home, nil, "start", "--", "exec", "say hi")
+	doneID := firstToken(done.stdout)
+	w := runCodexmon(t, home, nil, "wait", doneID, "--timeout", "20", "--json")
+	if w.code != 0 {
+		t.Fatalf("setup job failed: %s", w.stdout)
+	}
+	// One still-running job.
+	active := runCodexmon(t, home, []string{"FAKE_MODE=stall"}, "start", "--wall-timeout", "0", "--idle-timeout", "0", "--", "exec", "go forever")
+	activeID := firstToken(active.stdout)
+
+	if r := runCodexmon(t, home, nil, "clean", "--bogus"); r.code == 0 {
+		t.Error("clean with an unknown flag should fail")
+	}
+	clean := runCodexmon(t, home, nil, "clean", "--all")
+	if clean.code != 0 {
+		t.Fatalf("clean exit = %d, stderr=%s", clean.code, clean.stderr)
+	}
+	if !strings.Contains(clean.stdout, "removed 1 finished job(s)") {
+		t.Errorf("clean output = %q, want removed 1", clean.stdout)
+	}
+	list := runCodexmon(t, home, nil, "list")
+	if strings.Contains(list.stdout, doneID) {
+		t.Errorf("finished job %s should be gone after clean --all:\n%s", doneID, list.stdout)
+	}
+	if !strings.Contains(list.stdout, activeID) {
+		t.Errorf("active job %s must survive clean --all:\n%s", activeID, list.stdout)
+	}
+	runCodexmon(t, home, nil, "cancel", activeID)
+}
+
+// TestE2EAutoPrune proves an old finished job is reaped by the next launch —
+// and left alone when retention is disabled via env.
+func TestE2EAutoPrune(t *testing.T) {
+	seedOldJob := func(t *testing.T, home string) string {
+		oldID := "cdx-20200101-000000-abcdef"
+		dir := filepath.Join(home, "jobs", oldID)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		status := `{"id":"` + oldID + `","state":"completed","health":"done","phase":"completed",` +
+			`"started_at":"2020-01-01T00:00:00Z","updated_at":"2020-01-01T00:01:00Z",` +
+			`"ended_at":"2020-01-01T00:01:00Z","thresholds":{}}`
+		if err := os.WriteFile(filepath.Join(dir, "status.json"), []byte(status), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+
+	t.Run("default retention prunes", func(t *testing.T) {
+		home := t.TempDir()
+		oldDir := seedOldJob(t, home)
+		r := runCodexmon(t, home, nil, "run", "--", "exec", "say hi")
+		if r.code != 0 {
+			t.Fatalf("run exit = %d, stderr=%s", r.code, r.stderr)
+		}
+		if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
+			t.Error("a years-old finished job should be auto-pruned on launch")
+		}
+	})
+
+	t.Run("env can disable retention", func(t *testing.T) {
+		home := t.TempDir()
+		oldDir := seedOldJob(t, home)
+		r := runCodexmon(t, home, []string{"CODEXMON_KEEP_DAYS=0", "CODEXMON_KEEP_JOBS=0"}, "run", "--", "exec", "say hi")
+		if r.code != 0 {
+			t.Fatalf("run exit = %d, stderr=%s", r.code, r.stderr)
+		}
+		if _, err := os.Stat(oldDir); err != nil {
+			t.Error("with retention disabled the old job must survive")
+		}
+	})
 }
 
 func firstToken(s string) string {

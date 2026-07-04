@@ -3,6 +3,7 @@ package cli
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/tigercosmos/codexmon/internal/agent"
 	"github.com/tigercosmos/codexmon/internal/job"
@@ -285,5 +286,43 @@ func TestIsMonitorFlag(t *testing.T) {
 		if isMonitorFlag(f) {
 			t.Errorf("%q should not be a monitor flag", f)
 		}
+	}
+}
+
+func TestCmdClean(t *testing.T) {
+	t.Setenv("CODEXMON_HOME", t.TempDir())
+	now := time.Now()
+	mk := func(state job.State, ended time.Time) string {
+		id := job.NewID()
+		dir, err := job.Dir(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st := &job.Status{ID: id, State: state, StartedAt: ended.Add(-time.Minute), UpdatedAt: ended}
+		if !state.Active() {
+			st.EndedAt = &ended
+		}
+		if err := job.WriteStatus(dir, st); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	done := mk(job.StateCompleted, now.Add(-time.Hour))
+	active := mk(job.StateRunning, now)
+
+	if code := Run([]string{"clean", "--bogus"}); code == 0 {
+		t.Error("clean with an unknown flag should fail")
+	}
+	if code := Run([]string{"clean", "--keep-days", "banana"}); code == 0 {
+		t.Error("clean with a bad --keep-days should fail")
+	}
+	if code := Run([]string{"clean", "--all"}); code != 0 {
+		t.Fatalf("clean --all exited %d", code)
+	}
+	if _, err := job.ReadStatusByID(done); err == nil {
+		t.Error("terminal job should be removed by clean --all")
+	}
+	if _, err := job.ReadStatusByID(active); err != nil {
+		t.Error("active job must survive clean --all")
 	}
 }

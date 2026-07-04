@@ -261,6 +261,184 @@ func TestReconcileStaleWorker(t *testing.T) {
 	}
 }
 
+// mkJob writes a job dir with a status in the given state, ended at the given
+// time (ignored for active states), and returns its id.
+func mkJob(t *testing.T, state State, ended time.Time) string {
+	t.Helper()
+	id := NewID()
+	dir, err := Dir(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &Status{ID: id, State: state, StartedAt: ended.Add(-time.Minute), UpdatedAt: ended}
+	if !state.Active() {
+		st.EndedAt = &ended
+	}
+	if err := WriteStatus(dir, st); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func exists(t *testing.T, id string) bool {
+	t.Helper()
+	_, err := ReadStatusByID(id)
+	return err == nil
+}
+
+func TestPruneByAge(t *testing.T) {
+	t.Setenv("CODEXMON_HOME", t.TempDir())
+	now := time.Now()
+	old := mkJob(t, StateCompleted, now.Add(-10*24*time.Hour))
+	fresh := mkJob(t, StateCompleted, now.Add(-time.Hour))
+	active := mkJob(t, StateRunning, now)
+
+	removed, err := Prune(PruneOptions{MaxAge: 7 * 24 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Errorf("removed = %d, want 1", removed)
+	}
+	if exists(t, old) {
+		t.Error("old terminal job should be pruned")
+	}
+	if !exists(t, fresh) || !exists(t, active) {
+		t.Error("fresh and active jobs must survive an age prune")
+	}
+}
+
+func TestPruneByCount(t *testing.T) {
+	t.Setenv("CODEXMON_HOME", t.TempDir())
+	now := time.Now()
+	oldest := mkJob(t, StateFailed, now.Add(-3*time.Hour))
+	middle := mkJob(t, StateCompleted, now.Add(-2*time.Hour))
+	newest := mkJob(t, StateCompleted, now.Add(-time.Hour))
+	active := mkJob(t, StateQueued, now)
+
+	removed, err := Prune(PruneOptions{MaxCount: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Errorf("removed = %d, want 1", removed)
+	}
+	if exists(t, oldest) {
+		t.Error("oldest terminal job should be pruned past the count cap")
+	}
+	if !exists(t, middle) || !exists(t, newest) || !exists(t, active) {
+		t.Error("newest terminal jobs and active jobs must survive a count prune")
+	}
+}
+
+func TestPruneAllKeepsActive(t *testing.T) {
+	t.Setenv("CODEXMON_HOME", t.TempDir())
+	now := time.Now()
+	done := mkJob(t, StateCompleted, now)
+	cancelled := mkJob(t, StateCancelled, now)
+	active := mkJob(t, StateRunning, now)
+
+	// A fresh dir with no status yet (a launch in progress) must survive even
+	// --all; only once it is older than the grace age is it debris.
+	halfID := NewID()
+	if _, err := Dir(halfID); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := Prune(PruneOptions{All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 2 {
+		t.Errorf("removed = %d, want 2", removed)
+	}
+	if exists(t, done) || exists(t, cancelled) {
+		t.Error("--all should remove every terminal job")
+	}
+	if !exists(t, active) {
+		t.Error("--all must never remove an active job")
+	}
+	root, _ := jobsRoot()
+	halfDir := root + "/" + halfID
+	if _, err := os.Stat(halfDir); err != nil {
+		t.Error("--all must not race a launch: a fresh status-less dir must survive")
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(halfDir, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := Prune(PruneOptions{All: true}); n != 1 {
+		t.Errorf("aged status-less dir should be reaped by --all, removed = %d", n)
+	}
+}
+
+func TestPruneIgnoresForeignAndFreshUnreadableDirs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEXMON_HOME", home)
+	// A foreign (non-job-id) dir and a fresh half-initialized job dir (no
+	// status.json yet — a launch in progress) must both survive.
+	root, _ := jobsRoot()
+	foreign := root + "/notes"
+	if err := os.MkdirAll(foreign, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	halfID := NewID()
+	if _, err := Dir(halfID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Prune(PruneOptions{MaxAge: 7 * 24 * time.Hour, MaxCount: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Error("foreign dir must never be touched")
+	}
+	halfDir := root + "/" + halfID
+	if _, err := os.Stat(halfDir); err != nil {
+		t.Error("a fresh dir without a status must survive (launch in progress)")
+	}
+
+	// Once the unreadable dir is older than MaxAge it is reaped.
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	if err := os.Chtimes(halfDir, old, old); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := Prune(PruneOptions{MaxAge: 7 * 24 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Errorf("removed = %d, want 1 (the aged half-initialized dir)", removed)
+	}
+	if _, err := os.Stat(halfDir); err == nil {
+		t.Error("aged status-less dir should be reaped")
+	}
+}
+
+func TestDefaultPruneOptionsEnv(t *testing.T) {
+	t.Setenv("CODEXMON_KEEP_DAYS", "")
+	t.Setenv("CODEXMON_KEEP_JOBS", "")
+	opts := DefaultPruneOptions()
+	if opts.MaxAge != defaultKeepAge || opts.MaxCount != defaultKeepCount {
+		t.Errorf("defaults = %+v", opts)
+	}
+
+	t.Setenv("CODEXMON_KEEP_DAYS", "0")
+	t.Setenv("CODEXMON_KEEP_JOBS", "5")
+	opts = DefaultPruneOptions()
+	if opts.MaxAge != 0 || opts.MaxCount != 5 {
+		t.Errorf("env override = %+v, want MaxAge 0 MaxCount 5", opts)
+	}
+
+	// Garbage values are ignored, not fatal.
+	t.Setenv("CODEXMON_KEEP_DAYS", "banana")
+	t.Setenv("CODEXMON_KEEP_JOBS", "-3")
+	opts = DefaultPruneOptions()
+	if opts.MaxAge != defaultKeepAge || opts.MaxCount != defaultKeepCount {
+		t.Errorf("bad env should fall back to defaults, got %+v", opts)
+	}
+}
+
 func TestStateActive(t *testing.T) {
 	active := []State{StateQueued, StateRunning}
 	terminal := []State{StateCompleted, StateFailed, StateStalled, StateTimeout, StateCancelled}

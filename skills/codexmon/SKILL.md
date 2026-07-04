@@ -81,12 +81,13 @@ The JSON contract is identical for every agent. Key fields to branch on:
 | `elapsed_sec` / `idle_sec` | wall time, and seconds since last activity |
 | `last_event` | most recent step (e.g. `ran: go test ./... (exit 0)`) |
 | `usage` | input/output token counts (codex/claude; cursor reports none) |
-| `result_preview` | truncated final output; full text is in `result_file` |
+| `result` | final output, emitted by `wait --json` on completion (not by `status`); capped at 4 MiB — past that it ends with a notice naming `result_file`, which holds the full text |
+| `result_preview` | truncated final output; full text is also in `result_file` |
 | `error` | why it failed/stalled (names the stuck tool, etc.) |
 
 Decision rule: keep polling while `state` is `queued`/`running`. When terminal:
-`completed` → read `result_file` (or `result_preview`); anything else → report
-`error` to the user.
+`completed` → use `result` from `wait --json` (or read `result_file`); anything
+else → report `error` to the user.
 
 ## Exit codes (from `wait` and foreground runs)
 
@@ -121,3 +122,6 @@ bounded by the wall timeout.
   by design the child's stdin is `/dev/null` (this is what prevents the classic
   stdin hang). Pass prompts as arguments, or use `--stdin` to forward.
 - `status`/`wait`/`tail`/`cancel` with no id act on the most recent job.
+- **Old jobs clean themselves up.** Finished jobs are pruned on each launch
+  (7 days / newest 200 by default); `codexmon clean --all` clears them now.
+  Read the result before the retention window lapses if you need it later.

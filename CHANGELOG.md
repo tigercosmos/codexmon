@@ -4,6 +4,40 @@ All notable changes to codexmon are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor versions may change
 behavior).
 
+## Unreleased
+
+Retention for the jobs directory, a snappier `wait`, and a one-call JSON
+result.
+
+### Added
+
+- **Automatic job retention.** Finished jobs are pruned best-effort on every
+  launch — older than 7 days or beyond the newest 200 by default, tunable via
+  `CODEXMON_KEEP_DAYS` / `CODEXMON_KEEP_JOBS` (`0` disables that limit).
+  Previously `~/.codexmon/jobs/` grew without bound (each job can hold up to
+  128 MiB of logs) and every `list`/`status`/`wait` scanned all of it. Active
+  jobs are never pruned; a status that claims active but whose worker is dead
+  reconciles to terminal first, so it ages out too.
+- **`codexmon clean [--keep-days N] [--keep N] [--all]`** — apply retention on
+  demand. `--all` removes every finished job; active jobs always survive.
+- **`wait --json` / `run --json` embed the final output as `result`** on
+  completion, so a JSON consumer no longer needs a second read of
+  `result_file`. Capped at 4 MiB; a larger output ends with a truncation
+  notice naming `result_file`, which always holds the full text.
+  (`status --json` still carries only `result_preview` — it is the cheap
+  1 Hz poll.)
+
+### Changed
+
+- **`wait` polls adaptively**: it starts at 150 ms and backs off to
+  `--interval` (still 2 s by default), so a short job returns in milliseconds
+  instead of a full first interval; sleeps are also clamped to `--timeout` so
+  the deadline is honored precisely instead of overshooting by up to one
+  interval.
+- The monitor's stdout/stderr readers start with 64 KiB buffers (agent JSON
+  event lines routinely exceed bufio's 4 KiB default), and `tail -f` reuses its
+  read buffer across polls.
+
 ## v0.3.0
 
 Cursor reviews now run on a known model by default instead of Cursor's

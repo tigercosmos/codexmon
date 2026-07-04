@@ -36,10 +36,11 @@ USAGE
   codexmon start [flags] [--] <agent args> Launch detached; prints a job id to poll
   codexmon review [flags]                   Monitored code review across any agent (--uncommitted | --base REF)
   codexmon status [id] [--json]            Show health/status of a job (latest if id omitted)
-  codexmon wait [id] [--timeout S] [--json] Block until a job finishes, then print the result
+  codexmon wait [id] [--timeout S] [--interval S] [--json] Block until a job finishes, then print the result
   codexmon tail [id] [-f] [-n N]           Show (or follow) a job's log
   codexmon list [--json]                   List recent jobs
   codexmon cancel [id]                     Stop a running job
+  codexmon clean [--keep-days N] [--keep N] [--all] Remove old finished jobs (never active ones)
   codexmon doctor [--agent A] [--json]     Check that the agent is installed and usable
   codexmon version [--agent A]             Print versions
 
@@ -95,6 +96,8 @@ func Run(args []string) int {
 		return cmdList(args[1:])
 	case "cancel", "stop":
 		return cmdCancel(args[1:])
+	case "clean":
+		return cmdClean(args[1:])
 	case "doctor":
 		return cmdDoctor(args[1:])
 	case "__worker":
@@ -411,6 +414,10 @@ func launchAgent(cfg runConfig, prov agent.Provider, agentName string, args []st
 		cwd = abs
 	}
 
+	// Best-effort retention on every launch: keeps the jobs root bounded so
+	// list/status scans stay fast and finished-job logs cannot pile up forever.
+	_, _ = job.AutoPrune()
+
 	id := job.NewID()
 	dir, err := job.Dir(id)
 	if err != nil {
@@ -452,6 +459,7 @@ func runForeground(spec *job.Spec, dir string, jsonOut bool) int {
 
 	result := readResult(st)
 	if jsonOut {
+		st.Result = result
 		printJSON(st)
 	} else {
 		fmt.Println()
@@ -578,6 +586,13 @@ func cmdWait(args []string) int {
 	if timeout > 0 {
 		deadline = time.Now().Add(time.Duration(timeout * float64(time.Second)))
 	}
+	// Poll adaptively: fast at first so a short job returns promptly, backing
+	// off toward --interval (the cap) so a long wait stays cheap.
+	maxSleep := time.Duration(interval * float64(time.Second))
+	sleep := 150 * time.Millisecond
+	if sleep > maxSleep {
+		sleep = maxSleep
+	}
 	readErrs := 0
 	for st.State.Active() {
 		if !deadline.IsZero() && time.Now().After(deadline) {
@@ -591,7 +606,19 @@ func cmdWait(args []string) int {
 			}
 			return exitWaitTimeout
 		}
-		time.Sleep(time.Duration(interval * float64(time.Second)))
+		d := sleep
+		if !deadline.IsZero() {
+			// Never sleep past the deadline, so --timeout is honored precisely
+			// instead of overshooting by up to one interval.
+			if rem := time.Until(deadline); rem < d {
+				d = max(rem, 10*time.Millisecond)
+			}
+		}
+		time.Sleep(d)
+		// Gentle ×1.5 growth: sub-second jobs are detected within a few
+		// hundred ms, ~1-2s jobs before the first old fixed-interval check
+		// would have fired, and a long wait settles at the --interval cadence.
+		sleep = min(sleep*3/2, maxSleep)
 		// ReadStatus reconciles a dead worker to a terminal state, so this loop
 		// also ends if the worker crashes without recording a result. If the
 		// status file becomes persistently unreadable, don't spin forever.
@@ -608,6 +635,9 @@ func cmdWait(args []string) int {
 	}
 
 	if jsonOut {
+		// Embed the full final output so a JSON consumer gets everything in one
+		// call instead of a second read of result_file.
+		st.Result = readResult(st)
 		printJSON(st)
 	} else {
 		fmt.Print(render.Result(st, readResult(st)))
@@ -754,12 +784,12 @@ func tailLog(st *job.Status, n int, follow bool) int {
 	}
 
 	offset := size
+	buf := make([]byte, 64*1024)
 	for {
 		cur, err := job.ReadStatus(st.Dir)
 		if err == nil {
 			st = cur
 		}
-		buf := make([]byte, 64*1024)
 		for {
 			if _, err := f.Seek(offset, io.SeekStart); err != nil {
 				return fail(fmt.Errorf("seek log: %w", err))
@@ -839,6 +869,55 @@ func cmdCancel(args []string) int {
 		return 1
 	}
 	fmt.Printf("%s is now %s.\n", final.ID, final.State)
+	return 0
+}
+
+// ---- clean --------------------------------------------------------------------
+
+// cmdClean removes old finished jobs from the jobs root. Defaults match the
+// automatic retention applied on every launch (job.DefaultPruneOptions);
+// --keep-days / --keep tighten or loosen them for this run, --all removes every
+// terminal job. Active jobs are never removed.
+func cmdClean(args []string) int {
+	opts := job.DefaultPruneOptions()
+	s := &flagScan{args: args}
+	for s.i = 0; s.i < len(args); s.i++ {
+		name, attached := splitFlag(args[s.i])
+		switch name {
+		case "--all":
+			if err := noValue(name, attached); err != nil {
+				return fail(err)
+			}
+			opts.All = true
+		case "--keep-days":
+			v, err := s.value(name, attached)
+			if err != nil {
+				return fail(err)
+			}
+			days, perr := strconv.ParseFloat(strings.TrimSpace(v), 64)
+			if perr != nil || days < 0 {
+				return fail(fmt.Errorf("flag --keep-days needs a non-negative number of days, got %q", v))
+			}
+			opts.MaxAge = time.Duration(days * 24 * float64(time.Hour))
+		case "--keep":
+			v, err := s.value(name, attached)
+			if err != nil {
+				return fail(err)
+			}
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil || n < 0 {
+				return fail(fmt.Errorf("flag --keep needs a non-negative integer, got %q", v))
+			}
+			opts.MaxCount = n
+		default:
+			return fail(fmt.Errorf("unknown flag %q for clean", args[s.i]))
+		}
+	}
+	removed, err := job.Prune(opts)
+	if err != nil {
+		return fail(err)
+	}
+	fmt.Printf("removed %d finished job(s)\n", removed)
 	return 0
 }
 

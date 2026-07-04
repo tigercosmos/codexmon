@@ -283,8 +283,13 @@ func (r *runner) guard(cmd *exec.Cmd) {
 	}
 }
 
+// streamBufSize sizes the stream readers: agent JSON event lines routinely run
+// to tens of KiB (embedded tool output), so start well above bufio's 4 KiB
+// default to avoid repeated buffer growth on every long line.
+const streamBufSize = 64 << 10
+
 func (r *runner) readStdout(stdout io.Reader) {
-	br := bufio.NewReader(stdout)
+	br := bufio.NewReaderSize(stdout, streamBufSize)
 	for {
 		line, err := br.ReadString('\n')
 		if len(line) > 0 {
@@ -363,7 +368,7 @@ func (r *runner) applyEvent(ev agent.Event) {
 }
 
 func (r *runner) readStderr(stderr io.Reader) {
-	br := bufio.NewReader(stderr)
+	br := bufio.NewReaderSize(stderr, streamBufSize)
 	for {
 		line, err := br.ReadString('\n')
 		if len(line) > 0 {

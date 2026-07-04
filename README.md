@@ -151,10 +151,11 @@ subcommand is passed to the selected agent verbatim**, wrapped in monitoring.
 | `codexmon start [flags] [--] <agent args>` | Launch **detached**; prints a job id to poll |
 | `codexmon review [flags]` | Monitored **code review** on any agent: `--uncommitted` (default) or `--base REF` |
 | `codexmon status [id] [--json]` | Health/status of a job (latest if `id` omitted) |
-| `codexmon wait [id] [--timeout S] [--json]` | Block until a job finishes, then print the result |
+| `codexmon wait [id] [--timeout S] [--interval S] [--json]` | Block until a job finishes, then print the result (`--interval` caps the adaptive poll) |
 | `codexmon tail [id] [-f] [-n N]` | Show (or follow) a job's log |
 | `codexmon list [--json]` | List recent jobs |
 | `codexmon cancel [id]` | Stop a running job |
+| `codexmon clean [--keep-days N] [--keep N] [--all]` | Remove old finished jobs (active jobs are never touched) |
 | `codexmon doctor [--agent A] [--json]` | Check that the agent is installed and responding |
 | `codexmon version [--agent A]` | Print codexmon and agent versions |
 
@@ -261,7 +262,12 @@ codexmon cancel "$ID"                            # stop it if needed
 
 `status --json` and `wait --json` emit the full job record — state, health,
 phase, elapsed/idle seconds, last event, token usage, result preview — so an
-agent can branch on the outcome without parsing prose. To skip permission
+agent can branch on the outcome without parsing prose. On completion,
+`wait --json` (and a foreground `run --json`) additionally embeds the final
+output as `result` (capped at 4 MiB — a larger output ends with a truncation
+notice naming `result_file`, which always holds the full text), so one call
+yields everything; `wait` also polls adaptively (fast at first, backing off to
+`--interval`), so short jobs return in milliseconds. To skip permission
 prompts, allow `Bash(codexmon:*)` in `.claude/settings.json`.
 
 The contract is identical whichever agent does the work, so a Claude Code loop
@@ -294,6 +300,8 @@ cp -r skills/codexmon .claude/skills/          # project-local
 | `CODEXMON_CODEX` | Path to the `codex` binary (overrides `PATH`) |
 | `CODEXMON_CLAUDE` | Path to the `claude` binary (overrides `PATH`) |
 | `CODEXMON_CURSOR` | Path to the `cursor-agent` binary (overrides `PATH`) |
+| `CODEXMON_KEEP_DAYS` | Retention: prune finished jobs older than this many days (default `7`; `0` = no age limit) |
+| `CODEXMON_KEEP_JOBS` | Retention: keep at most this many finished jobs (default `200`; `0` = no count limit) |
 
 (Cursor also needs `CURSOR_API_KEY` for non-interactive use — codexmon passes
 your environment through to the agent.)
@@ -302,7 +310,10 @@ your environment through to the agent.)
 > point them at — only set them to a binary you trust.
 
 Each run gets `~/.codexmon/jobs/<id>/` (created `0700`; files `0600`, since
-prompts and output can be sensitive):
+prompts and output can be sensitive). Finished jobs are pruned automatically on
+each launch — by default after 7 days or beyond the newest 200 (tune with
+`CODEXMON_KEEP_DAYS` / `CODEXMON_KEEP_JOBS`, or run `codexmon clean` yourself);
+active jobs are never touched:
 
 ```
 spec.json      immutable launch spec (agent, args, cwd, thresholds)
