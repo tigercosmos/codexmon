@@ -89,7 +89,7 @@ supported agent CLI on your `PATH`: **`codex`** (default), **`claude`**
 
 ```sh
 # example: macOS (Apple Silicon) — substitute your version/os/arch
-curl -sSL https://github.com/tigercosmos/codexmon/releases/download/v0.2.0/codexmon_0.2.0_darwin_arm64.tar.gz \
+curl -sSL https://github.com/tigercosmos/codexmon/releases/download/v0.4.0/codexmon_0.4.0_darwin_arm64.tar.gz \
   | tar -xz codexmon && sudo mv codexmon /usr/local/bin/
 codexmon version
 ```
@@ -386,7 +386,7 @@ cut by GoReleaser from a version tag, via
 [`.github/workflows/release.yml`](.github/workflows/release.yml):
 
 ```sh
-git tag v0.2.0 && git push origin v0.2.0     # CI builds + publishes the release
+git tag v0.5.0 && git push origin v0.5.0     # CI builds + publishes the release
 ```
 
 To build the same cross-platform archives locally (no goreleaser required):
