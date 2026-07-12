@@ -14,6 +14,9 @@ import (
 // fakeCodex is a stand-in for the codex binary so monitor tests need no network
 // or auth. Behavior is driven by FAKE_MODE / FAKE_SLEEP env vars.
 const fakeCodex = `#!/bin/sh
+while [ "$1" = "--model" ] || [ "$1" = "-m" ] || [ "$1" = "--config" ] || [ "$1" = "-c" ]; do
+  shift 2
+done
 case "$1" in
   --version) echo "fake-codex 9.9.9"; exit 0 ;;
   doctor)    echo '{"ok":true}'; exit 0 ;;

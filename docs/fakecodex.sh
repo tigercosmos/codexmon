@@ -2,6 +2,9 @@
 # Minimal fake `codex` used only to record the codexmon demo (docs/demo.tape).
 # It emits a realistic `codex exec --json` event stream with small pauses, so the
 # recording needs no Codex install, network, or auth.
+while [ "$1" = "--model" ] || [ "$1" = "-m" ] || [ "$1" = "--config" ] || [ "$1" = "-c" ]; do
+  shift 2
+done
 case "$1" in
   --version)
     echo "codex-cli 0.0.0-fake"; exit 0 ;;

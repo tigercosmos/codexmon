@@ -6,6 +6,11 @@ import (
 	"github.com/tigercosmos/codexmon/internal/agent"
 )
 
+const (
+	defaultModel           = "gpt-5.6-sol"
+	defaultReasoningEffort = "high"
+)
+
 // flagsTakingValue is the set of codex flags whose following token is a value
 // (so the subcommand scanner must skip it). Covers global + common exec flags.
 var flagsTakingValue = map[string]bool{
@@ -76,11 +81,13 @@ func hasFlag(args []string, names ...string) bool {
 	return false
 }
 
-// Analyze decides how to run codex. When the subcommand is `exec` and JSON is
-// not disabled, it injects `--json` (for event monitoring) and, unless the
+// Analyze decides how to run codex. For `exec`, it defaults the model (and,
+// only when it also picks the model, the reasoning effort) unless the caller
+// supplied that setting via -m/--model, -c/--config, or a -p/--profile. When JSON is not
+// disabled, it also injects `--json` (for event monitoring) and, unless the
 // caller already set one, `--output-last-message <resultFile>` as a reliable
-// final-answer backup. Injected flags are placed right after the `exec` token,
-// where they apply to exec and any of its sub-subcommands (review/resume).
+// final-answer backup. Exec-specific flags are placed right after the `exec`
+// token, where they apply to exec and any of its sub-subcommands (review/resume).
 func Analyze(args []string, resultFile string, allowJSON bool) agent.Analysis {
 	subIdx := subcommandIndex(args)
 	sub := ""
@@ -105,15 +112,39 @@ func Analyze(args []string, resultFile string, allowJSON bool) agent.Analysis {
 	}
 
 	out := append([]string(nil), args...)
+	if isExec {
+		var defaults []string
+		// A profile (-p) layers a caller-chosen config (model, reasoning effort,
+		// and more) on top of the base config, so treat its presence as the
+		// caller managing both settings and inject nothing.
+		hasProfile := optionRegionsHaveFlag(args, subIdx, "-p", "--profile", "--profile-v2")
+		modelSet := hasProfile ||
+			optionRegionsHaveFlag(args, subIdx, "-m", "--model") ||
+			optionRegionsHaveConfig(args, subIdx, "model")
+		if !modelSet {
+			defaults = append(defaults, "--model", defaultModel)
+		}
+		// Only impose the reasoning-effort default when we also pick the model:
+		// a caller-chosen model may not support this setting, and an explicit
+		// reasoning config (or profile) should win.
+		if !modelSet && !optionRegionsHaveConfig(args, subIdx, "model_reasoning_effort") {
+			defaults = append(defaults, "--config", "model_reasoning_effort="+defaultReasoningEffort)
+		}
+		if len(defaults) > 0 {
+			// Model and config are global Codex options, so keep them before exec.
+			out = injectAt(out, subIdx, defaults)
+			subIdx += len(defaults)
+		}
+	}
 	if isExec && allowJSON {
 		var inject []string
 		// Scope the "already present?" check to the exec option region so a
 		// prompt or flag value that merely equals "--json"/"-o" can't suppress
 		// real injection (which would leave JSONMode on but no JSON stream).
-		if !execOptionsHaveFlag(args, subIdx, "--json") {
+		if !execOptionsHaveFlag(out, subIdx, "--json") {
 			inject = append(inject, "--json")
 		}
-		if resultFile != "" && !execOptionsHaveFlag(args, subIdx, "-o", "--output-last-message") {
+		if resultFile != "" && !execOptionsHaveFlag(out, subIdx, "-o", "--output-last-message") {
 			inject = append(inject, "--output-last-message", resultFile)
 		}
 		if len(inject) > 0 {
@@ -128,6 +159,64 @@ func Analyze(args []string, resultFile string, allowJSON bool) agent.Analysis {
 	// already there), never merely because the subcommand is exec.
 	jsonMode := isExec && allowJSON && hasFlag(out, "--json")
 	return agent.Analysis{JSONMode: jsonMode, Args: out, Title: title}
+}
+
+// optionRegionsHaveFlag checks the global option region before the subcommand
+// and, for exec, its option region after the subcommand. Prompt text is ignored.
+func optionRegionsHaveFlag(args []string, subIdx int, names ...string) bool {
+	if hasFlag(args[:subIdx], names...) {
+		return true
+	}
+	return execOptionsHaveFlag(args, subIdx, names...)
+}
+
+// optionRegionsHaveConfig reports whether a real -c/--config option sets key.
+// It checks both global and exec option regions without treating prompt text as
+// configuration.
+func optionRegionsHaveConfig(args []string, subIdx int, key string) bool {
+	if optionsHaveConfig(args[:subIdx], key, false) {
+		return true
+	}
+	return optionsHaveConfig(args[subIdx+1:], key, true)
+}
+
+func optionsHaveConfig(args []string, key string, allowExecSubcommand bool) bool {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			return false
+		}
+		if !strings.HasPrefix(a, "-") || a == "-" {
+			if allowExecSubcommand && isExecSubcommand(a) {
+				continue
+			}
+			return false
+		}
+
+		name, value, attached := a, "", false
+		if eq := strings.IndexByte(a, '='); eq > 0 {
+			name, value, attached = a[:eq], a[eq+1:], true
+		}
+		if name == "-c" || name == "--config" {
+			if !attached && i+1 < len(args) {
+				i++
+				value = args[i]
+			}
+			if configKey(value) == key {
+				return true
+			}
+			continue
+		}
+		if !attached && flagsTakingValue[name] {
+			i++
+		}
+	}
+	return false
+}
+
+func configKey(value string) string {
+	key, _, _ := strings.Cut(value, "=")
+	return strings.TrimSpace(key)
 }
 
 // execOptionsHaveFlag reports whether any of names appears as a real flag in the

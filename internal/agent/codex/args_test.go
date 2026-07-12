@@ -50,9 +50,86 @@ func TestAnalyzeExecInjectsJSON(t *testing.T) {
 	if a.Title != "codex exec review" {
 		t.Errorf("title = %q, want %q", a.Title, "codex exec review")
 	}
-	// --json must be placed right after exec, before the review sub-subcommand.
-	if a.Args[0] != "exec" || a.Args[1] != "--json" {
+	if !hasFlag(a.Args, "--model") {
+		t.Errorf("expected default --model injected, got %v", a.Args)
+	}
+	if !optionRegionsHaveConfig(a.Args, subcommandIndex(a.Args), "model_reasoning_effort") {
+		t.Errorf("expected default reasoning effort injected, got %v", a.Args)
+	}
+	// Global defaults precede exec; --json follows exec before the sub-subcommand.
+	if a.Args[4] != "exec" || a.Args[5] != "--json" {
 		t.Errorf("--json not injected right after exec: %v", a.Args)
+	}
+}
+
+func TestAnalyzeExecDefaultsModelAndReasoningEffort(t *testing.T) {
+	a := Analyze([]string{"exec", "hi"}, "", false)
+	wantPrefix := []string{
+		"--model", "gpt-5.6-sol",
+		"--config", "model_reasoning_effort=high",
+		"exec",
+	}
+	if !reflect.DeepEqual(a.Args[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("default args = %v, want prefix %v", a.Args, wantPrefix)
+	}
+}
+
+func TestAnalyzeExecRespectsModelAndReasoningOverrides(t *testing.T) {
+	a := Analyze([]string{
+		"--model", "custom-model",
+		"exec", "--config", "model_reasoning_effort=low", "hi",
+	}, "", false)
+	if !reflect.DeepEqual(a.Args, []string{
+		"--model", "custom-model",
+		"exec", "--config", "model_reasoning_effort=low", "hi",
+	}) {
+		t.Fatalf("caller overrides changed: %v", a.Args)
+	}
+}
+
+func TestAnalyzeExecRespectsModelConfigOverride(t *testing.T) {
+	a := Analyze([]string{"-c", "model=custom-model", "exec", "hi"}, "", false)
+	if hasFlag(a.Args, "-m", "--model") {
+		t.Fatalf("model config should suppress default --model: %v", a.Args)
+	}
+	// A caller-chosen model suppresses the reasoning-effort default too, so we
+	// never force a setting the chosen model may not support.
+	if !reflect.DeepEqual(a.Args, []string{
+		"-c", "model=custom-model",
+		"exec", "hi",
+	}) {
+		t.Fatalf("model config override changed: %v", a.Args)
+	}
+}
+
+func TestAnalyzeExecModelFlagSuppressesReasoningDefault(t *testing.T) {
+	a := Analyze([]string{"--model", "custom-model", "exec", "hi"}, "", false)
+	if optionRegionsHaveConfig(a.Args, subcommandIndex(a.Args), "model_reasoning_effort") {
+		t.Fatalf("explicit model should suppress reasoning-effort default: %v", a.Args)
+	}
+	if !reflect.DeepEqual(a.Args, []string{"--model", "custom-model", "exec", "hi"}) {
+		t.Fatalf("model flag override changed: %v", a.Args)
+	}
+}
+
+func TestAnalyzeExecProfileSuppressesDefaults(t *testing.T) {
+	a := Analyze([]string{"-p", "myprofile", "exec", "hi"}, "", false)
+	if hasFlag(a.Args, "-m", "--model") {
+		t.Fatalf("profile should suppress default --model: %v", a.Args)
+	}
+	if optionRegionsHaveConfig(a.Args, subcommandIndex(a.Args), "model_reasoning_effort") {
+		t.Fatalf("profile should suppress reasoning-effort default: %v", a.Args)
+	}
+	if !reflect.DeepEqual(a.Args, []string{"-p", "myprofile", "exec", "hi"}) {
+		t.Fatalf("profile run changed: %v", a.Args)
+	}
+}
+
+func TestAnalyzePromptLiteralsDoNotSuppressDefaults(t *testing.T) {
+	a := Analyze([]string{"exec", "explain", "--model", "fake", "--config", "model_reasoning_effort=low"}, "", false)
+	if len(a.Args) < 4 || a.Args[0] != "--model" || a.Args[1] != defaultModel ||
+		a.Args[2] != "--config" || a.Args[3] != "model_reasoning_effort=high" {
+		t.Fatalf("prompt literals suppressed defaults: %v", a.Args)
 	}
 }
 
@@ -86,8 +163,8 @@ func TestAnalyzeInjectionPositionWithExecValue(t *testing.T) {
 	if !a.JSONMode {
 		t.Fatalf("should detect exec subcommand, got %+v", a)
 	}
-	// args: [-c exec exec --json --output-last-message /tmp/r prompt]
-	if a.Args[2] != "exec" || a.Args[3] != "--json" {
+	// Global defaults are inserted before the real exec subcommand.
+	if a.Args[6] != "exec" || a.Args[7] != "--json" {
 		t.Errorf("--json injected at wrong position: %v", a.Args)
 	}
 	if a.Title != "codex exec" {
@@ -116,7 +193,7 @@ func TestAnalyzePromptTokenDoesNotSuppressInjection(t *testing.T) {
 	// A standalone "--json" token belonging to the prompt must NOT stop codexmon
 	// from injecting its own --json (which would leave JSONMode on with no stream).
 	a := Analyze([]string{"exec", "explain", "--json"}, "/tmp/r", true)
-	if a.Args[0] != "exec" || a.Args[1] != "--json" {
+	if a.Args[4] != "exec" || a.Args[5] != "--json" {
 		t.Errorf("--json should still be injected after exec: %v", a.Args)
 	}
 	if !a.JSONMode {
@@ -129,7 +206,7 @@ func TestAnalyzeExecAlias(t *testing.T) {
 	if !a.JSONMode {
 		t.Fatalf("`e` alias should be treated as exec: %+v", a)
 	}
-	if a.Args[0] != "e" || a.Args[1] != "--json" {
+	if a.Args[4] != "e" || a.Args[5] != "--json" {
 		t.Errorf("--json not injected after `e`: %v", a.Args)
 	}
 	if a.Title != "codex exec review" {
