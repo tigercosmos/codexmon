@@ -4,6 +4,23 @@ All notable changes to codexmon are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor versions may change
 behavior).
 
+## v0.5.0
+
+Opinionated model defaults for monitored `codex exec` runs.
+
+### Changed
+
+- **`codex exec` now defaults to `--model gpt-5.6-sol` at `high` reasoning
+  effort.** codexmon injects these as global Codex options (before the `exec`
+  token) so long-running, monitored reviews and tasks use a strong model
+  without the caller repeating the flags. Every explicit override wins:
+  `-m/--model`, `-c model=…`, or a `-p/--profile` suppresses the model default,
+  and the reasoning-effort default is imposed only when codexmon also picks the
+  model — so a caller-chosen model is never forced into a setting it may not
+  support. An explicit `-c model_reasoning_effort=…` is always respected. Only
+  the exec option region and global flags are inspected, so a prompt word that
+  happens to look like a flag can't suppress the defaults.
+
 ## v0.4.0
 
 Retention for the jobs directory, a snappier `wait`, and a one-call JSON
