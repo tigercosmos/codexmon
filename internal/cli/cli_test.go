@@ -249,14 +249,68 @@ func TestValueFlagRejectsFlagToken(t *testing.T) {
 }
 
 func TestStdinRejectedWithBackground(t *testing.T) {
-	prov, _, err := resolveAgent("codex")
+	sel := agentSelection{Explicit: true, Chain: []string{"codex"}}
+	// The stdin/background guard runs before any binary resolution, so this
+	// returns a non-zero code regardless of whether codex is installed.
+	code := launchChain(runConfig{background: true, forwardStdin: true}, sel,
+		func(agent.Provider) ([]string, error) { return []string{"exec", "hi"}, nil }, nil)
+	if code == 0 {
+		t.Error("--stdin combined with background should be rejected")
+	}
+}
+
+func TestSelectAgentsExplicit(t *testing.T) {
+	// An explicit --agent disables fallback: the chain is exactly that agent.
+	sel, err := selectAgents("claude")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The stdin/background guard runs before any binary resolution, so this
-	// returns a non-zero code regardless of whether codex is installed.
-	if code := launchAgent(runConfig{background: true, forwardStdin: true}, prov, "codex", []string{"exec", "hi"}, ""); code == 0 {
-		t.Error("--stdin combined with background should be rejected")
+	if !sel.Explicit || len(sel.Chain) != 1 || sel.Chain[0] != "claude" {
+		t.Errorf("explicit selection = %+v", sel)
+	}
+	if _, err := selectAgents("bogus"); err == nil {
+		t.Error("unknown explicit agent should error")
+	}
+}
+
+func TestSelectAgentsExplicitViaEnv(t *testing.T) {
+	// CODEXMON_AGENT counts as specifying the backend, so no fallback.
+	t.Setenv("CODEXMON_AGENT", "cursor")
+	sel, err := selectAgents("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sel.Explicit || len(sel.Chain) != 1 || sel.Chain[0] != "cursor" {
+		t.Errorf("env selection = %+v", sel)
+	}
+}
+
+func TestSelectAgentsFallbackChain(t *testing.T) {
+	// No backend specified → the full fallback chain, in order.
+	t.Setenv("CODEXMON_AGENT", "")
+	t.Setenv("CLAUDECODE", "")
+	sel, err := selectAgents("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sel.Explicit {
+		t.Error("an unspecified backend must not be explicit")
+	}
+	if !reflect.DeepEqual(sel.Chain, []string{"codex", "claude", "cursor"}) {
+		t.Errorf("fallback chain = %v, want codex,claude,cursor", sel.Chain)
+	}
+}
+
+func TestSelectAgentsFallbackChainFromClaude(t *testing.T) {
+	// A Claude caller drops claude from the chain (Cursor becomes last fallback).
+	t.Setenv("CODEXMON_AGENT", "")
+	t.Setenv("CLAUDECODE", "1")
+	sel, err := selectAgents("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(sel.Chain, []string{"codex", "cursor"}) {
+		t.Errorf("chain from Claude caller = %v, want codex,cursor", sel.Chain)
 	}
 }
 

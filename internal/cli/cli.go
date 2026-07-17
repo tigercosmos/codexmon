@@ -46,6 +46,10 @@ USAGE
 
 AGENT SELECTION (run/start/review/doctor/version)
       --agent NAME           codex (default), claude, or cursor; or set CODEXMON_AGENT
+                             With neither set, codexmon tries codex→claude→cursor in
+                             order, skipping any that is not installed and (foreground
+                             only) handing off if one hits a usage limit. A Claude
+                             caller (CLAUDECODE) is dropped from the chain.
 
 MONITOR FLAGS (run/start/review)
   -b, --background           Detach and return a job id immediately
@@ -304,6 +308,43 @@ func resolveAgent(sel string) (agent.Provider, string, error) {
 	return p, name, nil
 }
 
+// agentSelection is the outcome of resolving which agent(s) a run may use. When
+// the user named one (via --agent or CODEXMON_AGENT), Explicit is true and Chain
+// holds just that agent — codexmon runs it and nothing else. When neither is
+// set, Explicit is false and Chain is the fallback order (codex→claude→cursor,
+// minus the calling agent), which launchChain walks in turn.
+type agentSelection struct {
+	Explicit bool
+	Chain    []string
+}
+
+// selectAgents resolves the agent selection for a run. An explicit choice (sel
+// or CODEXMON_AGENT) disables fallback entirely, preserving today's behavior. An
+// unspecified backend yields the fallback chain, filtered to agents that are
+// actually registered.
+func selectAgents(sel string) (agentSelection, error) {
+	name := strings.TrimSpace(sel)
+	if name == "" {
+		name = strings.TrimSpace(os.Getenv("CODEXMON_AGENT"))
+	}
+	if name != "" {
+		if _, err := agent.Get(name); err != nil {
+			return agentSelection{}, err
+		}
+		return agentSelection{Explicit: true, Chain: []string{name}}, nil
+	}
+	var chain []string
+	for _, n := range agent.FallbackChain(agent.Caller()) {
+		if _, err := agent.Get(n); err == nil {
+			chain = append(chain, n)
+		}
+	}
+	if len(chain) == 0 {
+		return agentSelection{}, fmt.Errorf("no agents available (registered: %s)", strings.Join(agent.Names(), ", "))
+	}
+	return agentSelection{Chain: chain}, nil
+}
+
 func cmdRun(args []string, forceBackground bool) int {
 	cfg, passthrough, err := parseRunArgs(args)
 	if err != nil {
@@ -312,14 +353,18 @@ func cmdRun(args []string, forceBackground bool) int {
 	if forceBackground {
 		cfg.background = true
 	}
-	prov, agentName, err := resolveAgent(cfg.agent)
+	sel, err := selectAgents(cfg.agent)
 	if err != nil {
 		return fail(err)
 	}
 	if len(passthrough) == 0 {
-		return fail(fmt.Errorf("no %s arguments given; e.g. `codexmon exec review --uncommitted`", agentName))
+		return fail(fmt.Errorf("no agent arguments given; e.g. `codexmon exec review --uncommitted`"))
 	}
-	return launchAgent(cfg, prov, agentName, passthrough, "")
+	// Raw passthrough args are replayed to whichever agent runs; they are the
+	// user's own tokens, so codexmon does not translate them across agents.
+	return launchChain(cfg, sel, func(agent.Provider) ([]string, error) {
+		return passthrough, nil
+	}, nil)
 }
 
 // cmdReview turns a high-level review request into the selected agent's native
@@ -329,11 +374,7 @@ func cmdReview(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	prov, agentName, err := resolveAgent(cfg.agent)
-	if err != nil {
-		return fail(err)
-	}
-	reviewArgs, err := prov.ReviewArgs(rspec)
+	sel, err := selectAgents(cfg.agent)
 	if err != nil {
 		return fail(err)
 	}
@@ -341,8 +382,13 @@ func cmdReview(args []string) int {
 	if rspec.Scope == agent.ScopeBase {
 		scope = "base " + rspec.Base
 	}
-	title := agentName + " review (" + scope + ")"
-	return launchAgent(cfg, prov, agentName, reviewArgs, title)
+	// Each agent builds its own native review args, so a review falls back
+	// cleanly; the title names whichever agent actually ran.
+	return launchChain(cfg, sel, func(p agent.Provider) ([]string, error) {
+		return p.ReviewArgs(rspec)
+	}, func(agentName string) string {
+		return agentName + " review (" + scope + ")"
+	})
 }
 
 func parseReviewArgs(args []string) (runConfig, agent.ReviewSpec, error) {
@@ -388,28 +434,102 @@ func parseReviewArgs(args []string) (runConfig, agent.ReviewSpec, error) {
 	return cfg, rspec, nil
 }
 
-// launchAgent resolves the binary, builds the job spec for the given agent and
-// args (injecting any monitoring flags via the provider), and runs it foreground
-// or detached per cfg. A non-empty titleOverride replaces the analyzed title.
-func launchAgent(cfg runConfig, prov agent.Provider, agentName string, args []string, titleOverride string) int {
+// launchChain runs the selected agent(s) under monitoring. For an explicit
+// selection it runs exactly one agent (today's behavior). For the fallback chain
+// it walks the agents in order, applying two fallback rules so an unspecified
+// backend still gets the work done:
+//
+//   - doesn't exist: an agent whose binary is not installed is skipped, and the
+//     next agent is tried;
+//   - out of limit: for a foreground run, an agent that fails because it hit a
+//     usage/rate limit hands off to the next agent (a detached run returns its
+//     job id immediately, so only the existence rule can apply there).
+//
+// buildArgs produces the native args for a given provider (raw passthrough
+// replays the same args; review builds per-agent args); titleFor, when non-nil,
+// names the job for whichever agent runs.
+func launchChain(cfg runConfig, sel agentSelection, buildArgs func(agent.Provider) ([]string, error), titleFor func(agentName string) string) int {
 	// A detached worker's stdin is /dev/null, so forwarding can't reach a real
 	// terminal — reject the combination instead of silently ignoring it.
 	if cfg.background && cfg.forwardStdin {
 		return fail(errors.New("--stdin cannot be combined with -b/start: a detached worker has no terminal to forward"))
 	}
 
-	bin, err := agent.ResolveBin(prov, cfg.agentBin)
-	if err != nil {
-		return fail(fmt.Errorf("%s CLI not found (install it or set %s): %w", agentName, prov.BinEnv(), err))
-	}
+	var lastErr error
+	for idx, agentName := range sel.Chain {
+		last := idx == len(sel.Chain)-1
+		prov, err := agent.Get(agentName) // selectAgents already validated the name
+		if err != nil {
+			lastErr = err
+			continue
+		}
 
+		// An --agent-bin override targets a single, explicitly chosen agent; it is
+		// meaningless (and wrong) to point every agent in a fallback chain at one
+		// binary, so it applies only to an explicit selection.
+		override := ""
+		if sel.Explicit {
+			override = cfg.agentBin
+		}
+		bin, err := agent.ResolveBin(prov, override)
+		if err != nil {
+			lastErr = fmt.Errorf("%s CLI not found (install it or set %s): %w", agentName, prov.BinEnv(), err)
+			if !sel.Explicit && !last {
+				fmt.Fprintf(os.Stderr, "codexmon: %s unavailable, falling back to next agent (%v)\n", agentName, err)
+				continue
+			}
+			return fail(lastErr)
+		}
+
+		args, err := buildArgs(prov)
+		if err != nil {
+			return fail(err)
+		}
+		titleOverride := ""
+		if titleFor != nil {
+			titleOverride = titleFor(agentName)
+		}
+		spec, dir, err := buildJob(cfg, prov, agentName, bin, args, titleOverride)
+		if err != nil {
+			return fail(err)
+		}
+
+		if cfg.background {
+			return launchBackground(spec, dir, cfg.jsonOut)
+		}
+
+		st := runForeground(spec, dir, cfg.jsonOut)
+		result := readResult(st)
+		// Fall back only on a genuine capacity limit, matched against the failure
+		// message (st.Error), which finalize always fills for a StateFailed run.
+		// st.Error is not purely infrastructural — for claude/cursor it is derived
+		// from the model's own output — so IsLimitFailure matches only distinctive
+		// limit phrases, keeping a failed review that merely *discusses* rate
+		// limiting from being misread as codexmon hitting a limit. A miss just
+		// surfaces the original error, the safe direction.
+		if !sel.Explicit && !last && st.State == job.StateFailed && agent.IsLimitFailure(st.Error) {
+			fmt.Fprintf(os.Stderr, "codexmon: %s hit a usage/rate limit, falling back to next agent\n", agentName)
+			continue
+		}
+		return reportForeground(st, result, cfg.jsonOut)
+	}
+	if lastErr != nil {
+		return fail(lastErr)
+	}
+	return fail(errors.New("no agent available to run"))
+}
+
+// buildJob resolves the working directory, creates a job directory, injects the
+// provider's monitoring flags, and persists the launch spec. A non-empty
+// titleOverride replaces the analyzed title.
+func buildJob(cfg runConfig, prov agent.Provider, agentName, bin string, args []string, titleOverride string) (*job.Spec, string, error) {
 	cwd := cfg.cwd
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	} else {
 		abs, aerr := filepath.Abs(cwd)
 		if aerr != nil {
-			return fail(aerr)
+			return nil, "", aerr
 		}
 		cwd = abs
 	}
@@ -421,7 +541,7 @@ func launchAgent(cfg runConfig, prov agent.Provider, agentName string, args []st
 	id := job.NewID()
 	dir, err := job.Dir(id)
 	if err != nil {
-		return fail(err)
+		return nil, "", err
 	}
 	_, _, _, _, resultFile, _ := job.Paths(dir)
 
@@ -442,22 +562,25 @@ func launchAgent(cfg runConfig, prov agent.Provider, agentName string, args []st
 		Title:        title,
 	}
 	if err := job.WriteSpec(dir, spec); err != nil {
-		return fail(err)
+		return nil, "", err
 	}
-
-	if cfg.background {
-		return launchBackground(spec, dir, cfg.jsonOut)
-	}
-	return runForeground(spec, dir, cfg.jsonOut)
+	return spec, dir, nil
 }
 
-func runForeground(spec *job.Spec, dir string, jsonOut bool) int {
+// runForeground supervises a job to completion and returns its terminal status
+// without printing the result — launchChain decides whether to report it or fall
+// back to the next agent.
+func runForeground(spec *job.Spec, dir string, jsonOut bool) *job.Status {
 	if !jsonOut {
 		fmt.Fprintf(os.Stderr, "codexmon: %s (job %s)\n", spec.Title, spec.ID)
 	}
 	st, _ := monitor.Run(dir, spec, monitor.Options{Progress: os.Stderr})
+	return st
+}
 
-	result := readResult(st)
+// reportForeground prints a finished foreground job's outcome and returns its
+// exit code.
+func reportForeground(st *job.Status, result string, jsonOut bool) int {
 	if jsonOut {
 		st.Result = result
 		printJSON(st)

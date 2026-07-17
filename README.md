@@ -138,6 +138,16 @@ codexmon wait   "$ID"          # block until done, print the result
 > **Picking the agent.** `--agent codex|claude|cursor` (on `run`/`start`/
 > `review`/`doctor`/`version`) or the `CODEXMON_AGENT` env var selects who runs;
 > the default is `codex`, so every existing command keeps working unchanged.
+>
+> **Fallback when no backend is specified.** With neither `--agent` nor
+> `CODEXMON_AGENT` set, codexmon walks a fallback chain — **codex → claude →
+> cursor** — so an unspecified backend still gets the work done: it skips any
+> agent that is not installed, and (for a foreground run) hands off to the next
+> agent when the current one fails because it hit a usage/rate limit. A non-limit
+> failure is surfaced as-is, never masked by a retry. When codexmon is invoked
+> *by* Claude Code (`CLAUDECODE` is set), `claude` is dropped from the chain, so
+> it becomes **codex → cursor**. Naming an agent explicitly disables all of this
+> and runs exactly that one.
 
 ## Commands
 

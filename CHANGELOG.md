@@ -4,6 +4,23 @@ All notable changes to codexmon are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor versions may change
 behavior).
 
+## Unreleased
+
+Automatic agent fallback when no backend is specified.
+
+### Added
+
+- **Fallback chain for an unspecified backend.** When neither `--agent` nor
+  `CODEXMON_AGENT` is set, codexmon now tries agents in order — **codex → claude
+  → cursor** — instead of only ever running codex. It skips any agent whose
+  binary is not installed, and (for a foreground `run`/`review`) hands off to the
+  next agent when the current one fails because it hit a usage/rate limit. A
+  non-limit failure is surfaced as-is, never masked by a retry, and naming an
+  agent explicitly disables fallback entirely (the run uses exactly that agent).
+  When codexmon is invoked *by* Claude Code — detected via the `CLAUDECODE`
+  environment variable — `claude` is dropped from the chain so codexmon never
+  falls back to the agent already calling it, leaving **codex → cursor**.
+
 ## v0.5.0
 
 Opinionated model defaults for monitored `codex exec` runs.
