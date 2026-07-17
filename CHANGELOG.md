@@ -4,7 +4,7 @@ All notable changes to codexmon are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor versions may change
 behavior).
 
-## Unreleased
+## v0.6.0
 
 Automatic agent fallback when no backend is specified.
 
