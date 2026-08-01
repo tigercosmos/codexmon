@@ -1,7 +1,7 @@
 // Package cursor adapts the Cursor agent CLI (`cursor-agent`, also installed as
 // `agent`) to codexmon's agent contract. A headless review runs
 // `cursor-agent -p "<prompt>"`; codexmon adds `--output-format stream-json`,
-// defaults `--model composer-2.5` (unless the caller picked a model), and
+// defaults `--model cursor-grok-4.5-high` (unless the caller picked a model), and
 // parses the newline-delimited event stream:
 //
 //	{"type":"system","subtype":"init","session_id":"...","model":"...","cwd":"..."}
@@ -27,8 +27,8 @@ import (
 
 // defaultModel is the Cursor model codexmon selects when the caller hasn't
 // chosen one with --model. cursor-agent's own default is "auto" (server-side
-// selection); we pin Composer 2.5 so reviews run on a known model.
-const defaultModel = "composer-2.5"
+// selection); we pin Cursor Grok 4.5 so reviews run on a known model.
+const defaultModel = "cursor-grok-4.5-high"
 
 // Provider drives the Cursor agent CLI.
 type Provider struct{}
@@ -46,7 +46,7 @@ func (Provider) BinCandidates() []string { return []string{"cursor-agent"} }
 
 // Analyze adds the streaming-JSON flag for a headless (`-p`) run so codexmon can
 // monitor the event stream, unless the caller already chose an output format. It
-// also defaults --model to Composer 2.5 unless the caller specified a model.
+// also defaults --model to Cursor Grok 4.5 unless the caller specified a model.
 //
 // Everything at or after Cursor's `--` terminator is prompt text, not options
 // (callers need it for prompts that start with `-`). So injected flags go before

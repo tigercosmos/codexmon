@@ -99,10 +99,10 @@ func TestAnalyzeAndReview(t *testing.T) {
 }
 
 func TestAnalyzeDefaultsModel(t *testing.T) {
-	// No --model: codexmon defaults to Composer 2.5.
+	// No --model: codexmon defaults to Cursor Grok 4.5.
 	a := Provider{}.Analyze([]string{"-p", "review"}, "", true)
-	if v, present := flagValue(a.Args, "--model"); !present || v != "composer-2.5" {
-		t.Errorf("default model = %q present=%v, want composer-2.5", v, present)
+	if v, present := flagValue(a.Args, "--model"); !present || v != "cursor-grok-4.5-high" {
+		t.Errorf("default model = %q present=%v, want cursor-grok-4.5-high", v, present)
 	}
 
 	// Caller-specified model wins; codexmon must not append a second --model.

@@ -89,7 +89,7 @@ supported agent CLI on your `PATH`: **`codex`** (default), **`claude`**
 
 ```sh
 # example: macOS (Apple Silicon) — substitute your version/os/arch
-curl -sSL https://github.com/tigercosmos/codexmon/releases/download/v0.6.0/codexmon_0.6.0_darwin_arm64.tar.gz \
+curl -sSL https://github.com/tigercosmos/codexmon/releases/download/v0.7.0/codexmon_0.7.0_darwin_arm64.tar.gz \
   | tar -xz codexmon && sudo mv codexmon /usr/local/bin/
 codexmon version
 ```
@@ -186,8 +186,8 @@ run is observable: `--json` + `--output-last-message` for `codex exec`,
 `--output-format stream-json --verbose` for `claude -p`, and
 `--output-format stream-json` for `cursor-agent -p`. Use `--no-json` to opt out;
 without a parseable stream, codexmon falls back to monitoring raw stdout/stderr
-activity. For Cursor, codexmon also defaults `--model composer-2.5` (Composer
-2.5) unless you pass your own `--model`.
+activity. For Cursor, codexmon also defaults `--model cursor-grok-4.5-high`
+(Cursor Grok 4.5) unless you pass your own `--model`.
 
 ### Monitor flags (`run` / `start` / `review`)
 
@@ -396,7 +396,7 @@ cut by GoReleaser from a version tag, via
 [`.github/workflows/release.yml`](.github/workflows/release.yml):
 
 ```sh
-git tag v0.6.0 && git push origin v0.6.0     # CI builds + publishes the release
+git tag v0.7.0 && git push origin v0.7.0     # CI builds + publishes the release
 ```
 
 To build the same cross-platform archives locally (no goreleaser required):

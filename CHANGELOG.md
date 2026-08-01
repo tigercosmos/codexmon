@@ -4,6 +4,15 @@ All notable changes to codexmon are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor versions may change
 behavior).
 
+## v0.7.0
+
+New default model for monitored Cursor runs.
+
+### Changed
+
+- **Cursor runs default to Cursor Grok 4.5** (`--model cursor-grok-4.5-high`)
+  instead of Composer 2.5, unless you pass your own `--model`.
+
 ## v0.6.0
 
 Automatic agent fallback when no backend is specified.
