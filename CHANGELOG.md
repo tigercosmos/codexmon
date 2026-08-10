@@ -4,7 +4,7 @@ All notable changes to codexmon are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor versions may change
 behavior).
 
-## Unreleased
+## v0.8.0
 
 Reliability fixes to process lifecycle, agent fallback, and retention.
 
