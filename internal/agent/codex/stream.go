@@ -6,6 +6,7 @@ package codex
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	"github.com/tigercosmos/codexmon/internal/agent"
@@ -83,15 +84,11 @@ func (ev Event) Describe() (phase agent.Phase, summary string) {
 	case "turn.started":
 		return agent.PhaseStarting, "turn started"
 	case "turn.completed":
-		return agent.PhaseCompleted, "turn completed" + usageSuffix(ev.Usage)
+		return agent.PhaseCompleted, "turn completed" + agent.UsageSummary(ev.Usage)
 	case "turn.failed":
 		return agent.PhaseFailed, "turn failed" + rawSuffix(ev.Error)
 	case "error":
-		msg := ev.Message
-		if msg == "" {
-			msg = string(ev.Error)
-		}
-		return agent.PhaseFailed, "error: " + shorten(msg, 120)
+		return agent.PhaseFailed, "error: " + agent.Shorten(agent.FirstNonEmpty(ev.Message, errorText(ev.Error)), 120)
 	case "item.started", "item.updated", "item.completed":
 		if ev.Item == nil {
 			return "", ev.Type
@@ -108,7 +105,7 @@ func (it *Item) describe(lifecycle string) (agent.Phase, string) {
 	switch it.Type {
 	case "agent_message":
 		if done {
-			return agent.PhaseWriting, "message: " + shorten(it.Text, 120)
+			return agent.PhaseWriting, "message: " + agent.Shorten(it.Text, 120)
 		}
 		return agent.PhaseWriting, "drafting message"
 	case "reasoning":
@@ -121,14 +118,14 @@ func (it *Item) describe(lifecycle string) (agent.Phase, string) {
 		if done {
 			ec := "?"
 			if it.ExitCode != nil {
-				ec = itoa(*it.ExitCode)
+				ec = strconv.Itoa(*it.ExitCode)
 			}
-			return phase, "ran: " + shorten(it.Command, 80) + " (exit " + ec + ")"
+			return phase, "ran: " + agent.Shorten(it.Command, 80) + " (exit " + ec + ")"
 		}
-		return phase, "running: " + shorten(it.Command, 96)
+		return phase, "running: " + agent.Shorten(it.Command, 96)
 	case "file_change":
 		if done {
-			return agent.PhaseEditing, "edited " + itoa(len(it.Changes)) + " file(s)"
+			return agent.PhaseEditing, "edited " + strconv.Itoa(len(it.Changes)) + " file(s)"
 		}
 		return agent.PhaseEditing, "editing files"
 	case "mcp_tool_call":
@@ -136,7 +133,7 @@ func (it *Item) describe(lifecycle string) (agent.Phase, string) {
 	case "dynamic_tool_call":
 		return agent.PhaseInvestigate, "tool " + it.Tool
 	case "web_search":
-		return agent.PhaseSearching, "search: " + shorten(it.Query, 96)
+		return agent.PhaseSearching, "search: " + agent.Shorten(it.Query, 96)
 	case "entered_review_mode", "enteredReviewMode":
 		return agent.PhaseReviewing, "reviewer started"
 	case "exited_review_mode", "exitedReviewMode":
@@ -162,13 +159,13 @@ func classifyItem(itemType string) agent.ItemKind {
 func itemLabel(it *Item) string {
 	switch it.Type {
 	case "command_execution":
-		return shorten(it.Command, 60)
+		return agent.Shorten(it.Command, 60)
 	case "mcp_tool_call":
 		return it.Server + "/" + it.Tool
 	case "dynamic_tool_call":
 		return it.Tool
 	case "web_search":
-		return shorten(it.Query, 60)
+		return agent.Shorten(it.Query, 60)
 	default:
 		return it.Type
 	}
@@ -188,51 +185,46 @@ func looksLikeVerification(cmd string) bool {
 	return false
 }
 
-func usageSuffix(u *agent.Usage) string {
-	if u == nil {
+func rawSuffix(raw json.RawMessage) string {
+	s := errorText(raw)
+	if s == "" {
 		return ""
 	}
-	return " (" + itoa(u.InputTokens) + " in / " + itoa(u.OutputTokens) + " out tokens)"
+	return ": " + agent.Shorten(s, 120)
 }
 
-func rawSuffix(raw json.RawMessage) string {
+// maxFailBytes caps FailureText. It is far wider than a one-line summary because
+// this text is what agent.IsLimitFailure scans to decide whether to fall back to
+// the next agent, and a provider can bury "Too Many Requests" behind a verbose
+// JSON envelope — but it is still bounded, since the text lands in status.json.
+const maxFailBytes = 4096
+
+// FailureText returns the fullest available failure detail for an `error` or
+// `turn.failed` event.
+//
+// It is deliberately NOT cut to the display width: the summary from Describe is
+// for humans, while this feeds the usage-limit matching that drives agent
+// fallback. Truncating both at 120 bytes (as this package once did) meant a
+// rate-limit phrase sitting past the first line of a wrapped provider error was
+// silently invisible to the fallback chain.
+func (ev Event) FailureText() string {
+	msg := agent.FirstNonEmpty(ev.Message, errorText(ev.Error))
+	return agent.Shorten(msg, maxFailBytes)
+}
+
+// errorText renders an event's `error` payload as human text: a JSON object
+// carrying a `message` (the usual shape) yields just that message, anything else
+// its raw JSON.
+func errorText(raw json.RawMessage) string {
 	s := strings.TrimSpace(string(raw))
 	if s == "" || s == "null" {
 		return ""
 	}
-	return ": " + shorten(s, 120)
-}
-
-func shorten(s string, limit int) string {
-	s = strings.TrimSpace(strings.Join(strings.Fields(s), " "))
-	if len(s) <= limit {
-		return s
+	var obj struct {
+		Message string `json:"message"`
 	}
-	if limit <= 3 {
-		return s[:limit]
+	if err := json.Unmarshal(raw, &obj); err == nil && strings.TrimSpace(obj.Message) != "" {
+		return obj.Message
 	}
-	return s[:limit-3] + "..."
-}
-
-func itoa(n int) string {
-	// Tiny dependency-free int formatter to keep this package import-light.
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
+	return s
 }

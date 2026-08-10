@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // fakeProvider is a minimal Provider for registry/resolve tests.
@@ -126,3 +127,67 @@ func TestShortenAndUsage(t *testing.T) {
 // Ensure the RunFunc type is usable as a value (compile-time sanity for the
 // Doctor contract).
 var _ RunFunc = func(time.Duration, string, ...string) (string, error) { return "", nil }
+
+// Shorten must cut on a rune boundary: slicing mid-rune leaves a mangled byte
+// that renders as U+FFFD in status output and in status.json.
+func TestShortenDoesNotSplitRunes(t *testing.T) {
+	// Each "é" is two bytes, so most limits land mid-rune.
+	s := strings.Repeat("é", 40)
+	for limit := 1; limit < len(s); limit++ {
+		got := Shorten(s, limit)
+		if len(got) > limit {
+			t.Fatalf("Shorten(limit=%d) returned %d bytes", limit, len(got))
+		}
+		if !utf8.ValidString(got) {
+			t.Fatalf("Shorten(limit=%d) produced invalid UTF-8: %q", limit, got)
+		}
+	}
+	// A multi-byte string that fits is returned untouched.
+	if got := Shorten("héllo", 32); got != "héllo" {
+		t.Errorf("Shorten should leave a short string alone, got %q", got)
+	}
+}
+
+// The first occurrence wins, so a prompt operand that merely mentions a flag
+// cannot override the real one the caller passed ahead of it.
+func TestFlagValueFirstOccurrenceWins(t *testing.T) {
+	args := []string{"-p", "--output-format", "stream-json", "explain --output-format=json to me"}
+	if v, present := FlagValue(args, "--output-format"); !present || v != "stream-json" {
+		t.Errorf("FlagValue = (%q, %v), want (stream-json, true)", v, present)
+	}
+	if v, present := FlagValue([]string{"--model=a", "--model=b"}, "--model"); !present || v != "a" {
+		t.Errorf("attached form should also first-win, got %q", v)
+	}
+	if _, present := FlagValue([]string{"-p"}, "--model"); present {
+		t.Error("absent flag should report not present")
+	}
+	// A trailing flag with no value is present but empty.
+	if v, present := FlagValue([]string{"-p", "--model"}, "--model"); !present || v != "" {
+		t.Errorf("trailing flag = (%q, %v), want (\"\", true)", v, present)
+	}
+}
+
+func TestHasFlagFormsAndDecodeBlocks(t *testing.T) {
+	if !HasFlag([]string{"--output-format=json"}, "--output-format") {
+		t.Error("attached form should count as present")
+	}
+	if !HasFlag([]string{"-p"}, "-p", "--print") {
+		t.Error("any listed alias should count as present")
+	}
+	if HasFlag([]string{"--printer"}, "--print") {
+		t.Error("a longer flag with the same prefix is a different flag")
+	}
+	blocks := DecodeBlocks([]byte(`{"content":[{"type":"tool_use","id":"t1","name":"Bash"}]}`))
+	if len(blocks) != 1 || blocks[0].ID != "t1" || blocks[0].Name != "Bash" {
+		t.Errorf("tool_use block not decoded: %+v", blocks)
+	}
+	if got := DecodeBlocks([]byte(`{"content":"bare"}`)); len(got) != 1 || got[0].Text != "bare" {
+		t.Errorf("bare string content should decode as one text block, got %+v", got)
+	}
+	if got := DecodeBlocks([]byte(`{"content":7}`)); got != nil {
+		t.Errorf("unusable content should decode to nothing, got %+v", got)
+	}
+	if got := DecodeBlocks([]byte(`not json`)); got != nil {
+		t.Errorf("invalid JSON should decode to nothing, got %+v", got)
+	}
+}

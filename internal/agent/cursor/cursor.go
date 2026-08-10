@@ -48,6 +48,12 @@ func (Provider) BinCandidates() []string { return []string{"cursor-agent"} }
 // monitor the event stream, unless the caller already chose an output format. It
 // also defaults --model to Cursor Grok 4.5 unless the caller specified a model.
 //
+// Both injections are gated on print mode, mirroring how the codex adapter gates
+// on `exec` and the claude adapter on `-p`: only a headless run takes a model,
+// and a management subcommand (`cursor-agent status`, `login`, `ls`, …) must be
+// forwarded exactly as the user wrote it — one that rejects an unexpected
+// --model would fail for a flag codexmon added behind their back.
+//
 // Everything at or after Cursor's `--` terminator is prompt text, not options
 // (callers need it for prompts that start with `-`). So injected flags go before
 // the terminator, and existing-flag detection scans only the real options — a
@@ -55,14 +61,15 @@ func (Provider) BinCandidates() []string { return []string{"cursor-agent"} }
 func (Provider) Analyze(args []string, _ string, allowJSON bool) agent.Analysis {
 	term := terminatorIndex(args)
 	opts := args[:term]
+	printMode := agent.HasFlag(opts, "-p", "--print")
 
 	var inject []string
-	if !hasFlag(opts, "--model") {
+	if printMode && !agent.HasFlag(opts, "--model") {
 		inject = append(inject, "--model", defaultModel)
 	}
 	jsonMode := false
-	if allowJSON && hasFlag(opts, "-p", "--print") {
-		val, present := flagValue(opts, "--output-format")
+	if allowJSON && printMode {
+		val, present := agent.FlagValue(opts, "--output-format")
 		switch {
 		case !present:
 			inject = append(inject, "--output-format", "stream-json")
@@ -137,7 +144,7 @@ func (Provider) ParseLine(line string) (agent.Event, bool) {
 func assistantEvent(ln streamLine) agent.Event {
 	var out agent.Event
 	var texts []string
-	for _, b := range decodeBlocks(ln.Message) {
+	for _, b := range agent.DecodeBlocks(ln.Message) {
 		if b.Type == "text" {
 			if t := strings.TrimSpace(b.Text); t != "" {
 				texts = append(texts, t)
@@ -238,29 +245,6 @@ type streamLine struct {
 	IsError   bool                       `json:"is_error"`
 }
 
-type block struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
-func decodeBlocks(raw json.RawMessage) []block {
-	var msg struct {
-		Content json.RawMessage `json:"content"`
-	}
-	if err := json.Unmarshal(raw, &msg); err != nil || len(msg.Content) == 0 {
-		return nil
-	}
-	var blocks []block
-	if err := json.Unmarshal(msg.Content, &blocks); err == nil {
-		return blocks
-	}
-	var s string
-	if err := json.Unmarshal(msg.Content, &s); err == nil {
-		return []block{{Type: "text", Text: s}}
-	}
-	return nil
-}
-
 // firstKey returns the single tool key in a tool_call object (e.g.
 // "readToolCall"), or "" if there is none.
 func firstKey(m map[string]json.RawMessage) string {
@@ -285,30 +269,4 @@ func classifyTool(key string) (agent.ItemKind, string) {
 		}
 	}
 	return agent.KindTool, label
-}
-
-func hasFlag(args []string, names ...string) bool {
-	for _, a := range args {
-		for _, n := range names {
-			if a == n || strings.HasPrefix(a, n+"=") {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func flagValue(args []string, name string) (string, bool) {
-	for i, a := range args {
-		if a == name {
-			if i+1 < len(args) {
-				return args[i+1], true
-			}
-			return "", true
-		}
-		if v, ok := strings.CutPrefix(a, name+"="); ok {
-			return v, true
-		}
-	}
-	return "", false
 }

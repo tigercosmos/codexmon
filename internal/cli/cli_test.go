@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"os"
+	"os/exec"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/tigercosmos/codexmon/internal/agent"
 	"github.com/tigercosmos/codexmon/internal/job"
+	"github.com/tigercosmos/codexmon/internal/proc"
 )
 
 func TestParseRunArgsSeparator(t *testing.T) {
@@ -378,5 +381,178 @@ func TestCmdClean(t *testing.T) {
 	}
 	if _, err := job.ReadStatusByID(active); err != nil {
 		t.Error("active job must survive clean --all")
+	}
+}
+
+// A worker that dies without finalizing leaves its agent running. By the time
+// the user reaches for `cancel`, the job record has usually already reconciled
+// to a terminal state — and "already finished" describes the record, not the
+// process. Cancel must still stop the orphan, or the only way to reach it is a
+// manual pid hunt.
+func TestCancelReapsOrphanedAgentOfATerminalJob(t *testing.T) {
+	t.Setenv("CODEXMON_HOME", t.TempDir())
+
+	// A live agent in its own process group, exactly as codexmon starts one.
+	agentCmd := exec.Command("sleep", "60")
+	proc.SetChildGroup(agentCmd)
+	if err := agentCmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	agentPID := agentCmd.Process.Pid
+	exited := make(chan struct{})
+	go func() { _ = agentCmd.Wait(); close(exited) }()
+	t.Cleanup(func() { proc.KillGroupNow(agentPID); <-exited })
+
+	// A worker pid that is certainly gone.
+	reaped := exec.Command("true")
+	if err := reaped.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	id := job.NewID()
+	dir, err := job.Dir(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Already reconciled to terminal, and stale enough that the automatic reap in
+	// job.ReadStatus would decline — only the explicit cancel path can help here.
+	started := time.Now().Add(-time.Minute) // the agent was launched with the job
+	old := time.Now().Add(-2 * time.Hour)
+	if err := job.WriteStatus(dir, &job.Status{
+		ID: id, State: job.StateFailed, Health: job.HealthDead,
+		Error:     "worker process is no longer running",
+		WorkerPID: reaped.ProcessState.Pid(), AgentPID: agentPID,
+		StartedAt: started, UpdatedAt: old, EndedAt: &old, Dir: dir,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := cmdCancel([]string{id}); code != 0 {
+		t.Errorf("cancel exit = %d, want 0", code)
+	}
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancel left the orphaned agent running")
+	}
+}
+
+// The same path must not touch an agent whose worker is still alive and
+// supervising it.
+func TestCancelLeavesASupervisedAgentAlone(t *testing.T) {
+	t.Setenv("CODEXMON_HOME", t.TempDir())
+
+	agentCmd := exec.Command("sleep", "60")
+	proc.SetChildGroup(agentCmd)
+	if err := agentCmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	agentPID := agentCmd.Process.Pid
+	exited := make(chan struct{})
+	go func() { _ = agentCmd.Wait(); close(exited) }()
+	t.Cleanup(func() { proc.KillGroupNow(agentPID); <-exited })
+
+	// A job that started a moment ago, so the live worker pid verifies as this
+	// job's own worker rather than a recycled number.
+	st := &job.Status{
+		ID: "x", State: job.StateCompleted, Health: job.HealthDone,
+		WorkerPID: os.Getpid(), AgentPID: agentPID, // worker very much alive
+		StartedAt: time.Now().Add(-time.Minute),
+	}
+	if code := reapOrphanedAgent(st); code != 0 {
+		t.Errorf("exit = %d, want 0", code)
+	}
+	select {
+	case <-exited:
+		t.Error("an agent whose worker is alive must not be reaped")
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// Being asked to cancel does not prove the recorded pid is still this job's
+// agent. A pid that now belongs to a process which started long after the job
+// did has been recycled, and killing it would be an unrecoverable mistake.
+func TestCancelWillNotKillARecycledPID(t *testing.T) {
+	t.Setenv("CODEXMON_HOME", t.TempDir())
+
+	// A live group leader standing in for whatever inherited the pid.
+	other := exec.Command("sleep", "60")
+	proc.SetChildGroup(other)
+	if err := other.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := other.Process.Pid
+	exited := make(chan struct{})
+	go func() { _ = other.Wait(); close(exited) }()
+	t.Cleanup(func() { proc.KillGroupNow(pid); <-exited })
+
+	reaped := exec.Command("true")
+	if err := reaped.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The job ran days ago; this process started seconds ago.
+	long := time.Now().Add(-72 * time.Hour)
+	st := &job.Status{
+		ID: "cdx-old", State: job.StateFailed, Health: job.HealthDead,
+		WorkerPID: reaped.ProcessState.Pid(), AgentPID: pid,
+		StartedAt: long, UpdatedAt: long, EndedAt: &long,
+	}
+	if code := reapOrphanedAgent(st); code != 0 {
+		t.Errorf("exit = %d, want 0", code)
+	}
+	select {
+	case <-exited:
+		t.Fatal("cancel killed a process that only inherited the recorded pid")
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// A live worker pid is not proof the worker is still there: on an old job that
+// number may since have been handed to something unrelated. Believing it would
+// abandon a genuinely orphaned agent, so ownership is verified by start time.
+func TestCancelReapsOrphanWhenWorkerPIDWasRecycled(t *testing.T) {
+	t.Setenv("CODEXMON_HOME", t.TempDir())
+
+	agentCmd := exec.Command("sleep", "60")
+	proc.SetChildGroup(agentCmd)
+	if err := agentCmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	agentPID := agentCmd.Process.Pid
+	exited := make(chan struct{})
+	go func() { _ = agentCmd.Wait(); close(exited) }()
+	t.Cleanup(func() { proc.KillGroupNow(agentPID); <-exited })
+
+	// Narrow the identity window so "started after the job" can be staged in
+	// seconds rather than minutes. ps resolves to whole seconds, hence the pause.
+	defer func(orig time.Duration) { agentStartSlack = orig }(agentStartSlack)
+	agentStartSlack = 0
+	time.Sleep(2 * time.Second)
+	startedAt := time.Now()
+	time.Sleep(2 * time.Second)
+
+	// A live process standing in for whatever inherited the dead worker's pid:
+	// it began after the job did, so it cannot be that job's worker.
+	impostor := exec.Command("sleep", "60")
+	if err := impostor.Start(); err != nil {
+		t.Fatal(err)
+	}
+	impostorExited := make(chan struct{})
+	go func() { _ = impostor.Wait(); close(impostorExited) }()
+	t.Cleanup(func() { _ = impostor.Process.Kill(); <-impostorExited })
+
+	st := &job.Status{
+		ID: "cdx-recycled", State: job.StateFailed, Health: job.HealthDead,
+		WorkerPID: impostor.Process.Pid, AgentPID: agentPID,
+		StartedAt: startedAt,
+	}
+	if code := reapOrphanedAgent(st); code != 0 {
+		t.Errorf("exit = %d, want 0", code)
+	}
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Error("a verified orphan was abandoned because a recycled worker pid looked alive")
 	}
 }

@@ -76,7 +76,10 @@ func (Provider) ParseLine(line string) (agent.Event, bool) {
 	}
 	if ev.Type == "error" || ev.Type == "turn.failed" {
 		out.Failure = true
-		out.FailMsg = summary
+		// FailureText, not summary: the summary is cut to one display line, and
+		// the fallback chain scans this text for usage-limit phrases that a
+		// verbose provider error can push well past that cut.
+		out.FailMsg = agent.FirstNonEmpty(ev.FailureText(), summary)
 	}
 	return out, true
 }

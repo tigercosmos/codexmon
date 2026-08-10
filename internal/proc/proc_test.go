@@ -113,3 +113,70 @@ func TestSetDetachedSetsSid(t *testing.T) {
 		t.Error("SetDetached should set Setsid")
 	}
 }
+
+func TestParseETime(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want time.Duration
+		ok   bool
+	}{
+		{"00:00", 0, true},
+		{" 01:30 ", 90 * time.Second, true},
+		{"02:03:04", 2*time.Hour + 3*time.Minute + 4*time.Second, true},
+		{"3-04:05:06", 76*time.Hour + 5*time.Minute + 6*time.Second, true},
+		{"", 0, false},
+		{"garbage", 0, false},
+		{"1:2:3:4", 0, false},
+		{"-1:00", 0, false},
+	} {
+		got, ok := parseETime(tc.in)
+		if ok != tc.ok || (ok && got != tc.want) {
+			t.Errorf("parseETime(%q) = (%v, %v), want (%v, %v)", tc.in, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+// StartTime underpins the identity check that gates every signal codexmon sends
+// to a pid read out of a file, so it must agree with reality for a process we
+// just started — and must refuse to guess for one that does not exist.
+func TestStartTimeAndStartedBefore(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+
+	launched := time.Now()
+	started, ok := StartTime(pid)
+	if !ok {
+		t.Fatal("StartTime should resolve a live process")
+	}
+	// ps reports whole seconds, so allow a couple either way.
+	if d := started.Sub(launched); d > 2*time.Second || d < -3*time.Second {
+		t.Errorf("StartTime off by %v from the actual launch", d)
+	}
+	if !StartedBefore(pid, launched.Add(time.Minute)) {
+		t.Error("a process started now should count as started before a later cutoff")
+	}
+	// A cutoff before the process existed must reject it — this is the recycled
+	// pid case, where the number is live but the process is somebody else's.
+	if StartedBefore(pid, launched.Add(-time.Hour)) {
+		t.Error("a process must not pass a cutoff predating its start")
+	}
+
+	// An unknown pid is indeterminate, which must read as "do not signal".
+	reaped := exec.Command("true")
+	if err := reaped.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := StartTime(reaped.ProcessState.Pid()); ok {
+		t.Error("StartTime should not resolve a dead pid")
+	}
+	if StartedBefore(reaped.ProcessState.Pid(), time.Now()) {
+		t.Error("an unresolvable pid must never pass the identity check")
+	}
+	if StartedBefore(0, time.Now()) || StartedBefore(-1, time.Now()) {
+		t.Error("a non-positive pid must never pass the identity check")
+	}
+}

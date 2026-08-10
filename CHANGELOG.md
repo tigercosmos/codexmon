@@ -4,6 +4,82 @@ All notable changes to codexmon are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor versions may change
 behavior).
 
+## Unreleased
+
+Reliability fixes to process lifecycle, agent fallback, and retention.
+
+### Fixed
+
+- **Ctrl+C no longer orphans the agent.** The agent runs in its own process
+  group, so an interrupt at the terminal reached codexmon alone: codexmon died
+  by the default disposition and left the agent running unsupervised — still
+  spending tokens, with nothing left watching it. SIGINT and SIGTERM now stop
+  the agent's process group and record the job as `cancelled`, exactly as
+  `codexmon cancel` does. A second Ctrl+C still force-quits.
+- **A recycled pid can no longer be killed.** Before signalling an agent pid read
+  out of a job file, codexmon now verifies the process actually started inside
+  that job's launch window (plus the cheaper checks that it is alive and still
+  leads its own process group), so an unrelated process that inherited the pid
+  is never terminated. Because identity is verified rather than assumed,
+  `codexmon cancel` can still stop a genuinely orphaned agent at any age: a job
+  that already reconciled to a terminal state no longer reports "already
+  finished" and walks away leaving its agent running. The same identity check
+  applies to the recorded worker pid, so a recycled worker number can neither
+  fake a live supervisor nor cause a real orphan to be abandoned; when the worker
+  really is alive, cancel asks it to stop rather than killing its child.
+- **A fast-failing background job keeps its real error.** The launcher recorded
+  the worker pid by rewriting the whole status file, which could overwrite a
+  terminal status the worker had already written (a bad agent binary, say) with
+  a stale `queued`. The error then surfaced as the far vaguer "worker ended
+  without recording a result". The worker is now the only writer of `status.json`
+  from the moment it starts; it records that pid itself.
+- **Suspend/resume no longer reports a healthy run as failed.** Status writes
+  stop while a machine sleeps, which looked identical to a wedged worker. A live
+  worker now has 10 minutes of silence before it is judged dead, and that verdict
+  is no longer persisted, so a resumed run keeps its own record. `clean` also
+  leaves a job alone while its worker process is still alive.
+- **A crashed launch no longer shadows every later job.** A job seeded as
+  `queued` whose worker never took over stayed active forever — never
+  reconciled, never pruned — and `status`/`wait` with no id resolved to it
+  indefinitely. It now ages out after a minute.
+- **Agent fallback sees the whole failure message.** For codex, the text scanned
+  for usage-limit phrases was the same 120-byte string used for the one-line
+  status summary, so a rate limit wrapped in a verbose provider payload was
+  invisible and the run failed instead of handing off to the next agent. The
+  match now runs against the full message (up to 4 KiB, so `error` in a status
+  block can be longer than before), and a nested `{"message": ...}` error is
+  unwrapped rather than shown as raw JSON.
+- **A chatty agent cannot exhaust the worker's memory.** Output is now read in
+  bounded chunks — previously a single huge blob with no newline in it grew
+  without limit — and the non-JSON run's accumulated stdout is capped at 8 MiB
+  (`output.log` still holds up to 64 MiB). Either could previously OOM-kill the
+  worker, which then surfaced as the much vaguer "worker died without recording
+  a result". Memory now stays flat regardless of how much the agent emits, and
+  anything dropped is reported in both the log and the result rather than
+  disappearing silently.
+- Long runs report an hours unit — `2h05m03s`, not `125m03s` — and the `list`
+  columns are wide enough to keep the table aligned past an hour.
+- `doctor` no longer reports a probe that succeeded at the deadline boundary as
+  a timeout, and truncated summaries, result previews, and printed results no
+  longer cut a multi-byte character in half.
+- `clean` never removes a job whose worker process is still running, even under
+  `--all`. Such a job is not finished whatever its record says — a status
+  reconciles to `failed` while a merely-suspended worker is very much alive — and
+  deleting the directory would strand that worker writing into removed files with
+  no status, log, or cancel marker.
+- An interrupt that arrives in the same instant the agent exits no longer
+  nondeterministically relabels a completed run as `cancelled`.
+
+### Changed
+
+- **Cursor's default `--model` is applied only to print-mode (`-p`) runs**, the
+  ones codexmon monitors — matching how the codex adapter gates on `exec` and
+  the claude adapter on `-p`. Management subcommands (`cursor-agent status`,
+  `login`, `ls`, …) are now forwarded exactly as typed rather than receiving a
+  `--model` flag they never asked for and may reject.
+- The flag-scanning and message-decoding helpers the three agent adapters had
+  each copied now live in one place, so they cannot drift apart.
+
 ## v0.7.0
 
 New default model for monitored Cursor runs.

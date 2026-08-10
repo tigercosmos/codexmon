@@ -39,8 +39,8 @@ func (Provider) BinCandidates() []string { return []string{"claude"} }
 func (Provider) Analyze(args []string, _ string, allowJSON bool) agent.Analysis {
 	out := append([]string(nil), args...)
 	jsonMode := false
-	if allowJSON && hasFlag(args, "-p", "--print") {
-		val, present := flagValue(args, "--output-format")
+	if allowJSON && agent.HasFlag(args, "-p", "--print") {
+		val, present := agent.FlagValue(args, "--output-format")
 		switch {
 		case !present:
 			out = append(out, "--output-format", "stream-json")
@@ -49,7 +49,7 @@ func (Provider) Analyze(args []string, _ string, allowJSON bool) agent.Analysis 
 			jsonMode = true
 		}
 		// stream-json in print mode requires --verbose to emit per-turn events.
-		if jsonMode && !hasFlag(args, "--verbose") {
+		if jsonMode && !agent.HasFlag(args, "--verbose") {
 			out = append(out, "--verbose")
 		}
 	}
@@ -111,7 +111,7 @@ func (Provider) ParseLine(line string) (agent.Event, bool) {
 func assistantEvent(ln streamLine) agent.Event {
 	var out agent.Event
 	var texts, names []string
-	for _, b := range decodeBlocks(ln.Message) {
+	for _, b := range agent.DecodeBlocks(ln.Message) {
 		switch b.Type {
 		case "text":
 			if t := strings.TrimSpace(b.Text); t != "" {
@@ -152,7 +152,7 @@ func assistantEvent(ln streamLine) agent.Event {
 
 func userEvent(ln streamLine) agent.Event {
 	var out agent.Event
-	for _, b := range decodeBlocks(ln.Message) {
+	for _, b := range agent.DecodeBlocks(ln.Message) {
 		if b.Type == "tool_result" && b.ToolUseID != "" {
 			out.Finished = append(out.Finished, b.ToolUseID)
 		}
@@ -222,14 +222,6 @@ type streamLine struct {
 	Usage     *claudeUsage    `json:"usage"`
 }
 
-type block struct {
-	Type      string `json:"type"`
-	Text      string `json:"text"`
-	ID        string `json:"id"`          // tool_use id
-	Name      string `json:"name"`        // tool name (for tool_use)
-	ToolUseID string `json:"tool_use_id"` // matching id on a tool_result
-}
-
 type claudeUsage struct {
 	InputTokens           int `json:"input_tokens"`
 	OutputTokens          int `json:"output_tokens"`
@@ -249,27 +241,6 @@ func (u *claudeUsage) normalized() *agent.Usage {
 	}
 }
 
-// decodeBlocks pulls the content blocks out of a Claude message. The message's
-// `content` is normally an array of blocks, but a plain user message may carry a
-// bare string; both are tolerated.
-func decodeBlocks(raw json.RawMessage) []block {
-	var msg struct {
-		Content json.RawMessage `json:"content"`
-	}
-	if err := json.Unmarshal(raw, &msg); err != nil || len(msg.Content) == 0 {
-		return nil
-	}
-	var blocks []block
-	if err := json.Unmarshal(msg.Content, &blocks); err == nil {
-		return blocks
-	}
-	var s string
-	if err := json.Unmarshal(msg.Content, &s); err == nil {
-		return []block{{Type: "text", Text: s}}
-	}
-	return nil
-}
-
 // toolLabel renders an MCP tool name (`mcp__server__tool`) as "server/tool" and
 // otherwise returns the tool name unchanged.
 func toolLabel(name string) string {
@@ -280,32 +251,4 @@ func toolLabel(name string) string {
 		return "tool"
 	}
 	return name
-}
-
-func hasFlag(args []string, names ...string) bool {
-	for _, a := range args {
-		for _, n := range names {
-			if a == n || strings.HasPrefix(a, n+"=") {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// flagValue returns the value of a `--name value` or `--name=value` flag and
-// whether the flag was present at all.
-func flagValue(args []string, name string) (string, bool) {
-	for i, a := range args {
-		if a == name {
-			if i+1 < len(args) {
-				return args[i+1], true
-			}
-			return "", true
-		}
-		if v, ok := strings.CutPrefix(a, name+"="); ok {
-			return v, true
-		}
-	}
-	return "", false
 }

@@ -17,8 +17,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/tigercosmos/codexmon/internal/agent"
@@ -34,6 +37,10 @@ const drainGrace = 5 * time.Second
 // maxLogBytes caps each of output.log and events.jsonl so an unbounded run
 // cannot fill the disk. Past the cap we stop appending (a notice is written).
 const maxLogBytes = 64 << 20 // 64 MiB
+
+// maxResultBufBytes caps the in-memory accumulation of a non-JSON run's stdout,
+// which becomes result.txt. Unlike the log caps this one bounds RAM, not disk.
+const maxResultBufBytes = 8 << 20 // 8 MiB
 
 // DefaultThresholds are the watchdog limits applied when a field is unset.
 func DefaultThresholds() job.Thresholds {
@@ -51,6 +58,11 @@ type Options struct {
 	// Progress, if set, receives the same human-readable, timestamped lines
 	// written to the job log (typically os.Stderr in foreground mode).
 	Progress io.Writer
+
+	// signals, when non-nil, replaces the real SIGINT/SIGTERM subscription with
+	// a channel the test drives. Delivering a genuine signal to the test process
+	// would kill the test binary outright if the handler were not installed yet.
+	signals <-chan os.Signal
 }
 
 type runner struct {
@@ -75,6 +87,8 @@ type runner struct {
 
 	resultText      string                  // most recent agent_message (final answer)
 	resultBuf       strings.Builder         // accumulated stdout for non-JSON mode
+	resultCapped    bool                    // resultBuf hit maxResultBufBytes
+	lineTruncNoted  bool                    // a line-truncation marker is already in resultBuf
 	stderrTail      []string                // last few meaningful stderr lines
 	inFlight        map[string]inflightItem // items started but not completed
 	sawFailureEvent bool                    // an error / turn.failed event was observed
@@ -163,6 +177,12 @@ func Run(dir string, spec *job.Spec, opts Options) (*job.Status, error) {
 		r.evF = evF
 	}
 
+	// Subscribe before the child exists: an interrupt in the gap between spawning
+	// it and installing the handler would kill codexmon by the default
+	// disposition and orphan the agent — the very failure this guards against.
+	sigC, stopSignals := r.subscribeSignals()
+	defer stopSignals()
+
 	cmd := exec.Command(spec.AgentBin, spec.Args...)
 	cmd.Dir = spec.Cwd
 	if len(spec.Env) > 0 {
@@ -204,7 +224,7 @@ func Run(dir string, spec *job.Spec, opts Options) (*job.Status, error) {
 	r.st.AgentPID = cmd.Process.Pid
 	r.persistLocked()
 	r.mu.Unlock()
-	r.emit("started " + r.agentName + " pid " + itoa(cmd.Process.Pid) + " (" + spec.Title + ")")
+	r.emit("started " + r.agentName + " pid " + strconv.Itoa(cmd.Process.Pid) + " (" + spec.Title + ")")
 
 	var readers sync.WaitGroup
 	readers.Add(2)
@@ -221,8 +241,13 @@ func Run(dir string, spec *job.Spec, opts Options) (*job.Status, error) {
 
 	stopWatch := make(chan struct{})
 	var watchDone sync.WaitGroup
-	watchDone.Add(1)
+	watchDone.Add(2)
 	go func() { defer watchDone.Done(); defer r.guard(cmd); r.watchdog(cmd, procExited, stopWatch) }()
+	go func() {
+		defer watchDone.Done()
+		defer r.guard(cmd)
+		r.watchSignals(cmd, sigC, stopSignals, procExited, stopWatch)
+	}()
 
 	<-procExited // the process has exited; exit code is now available
 
@@ -283,6 +308,72 @@ func (r *runner) guard(cmd *exec.Cmd) {
 	}
 }
 
+// subscribeSignals returns the channel interrupts arrive on, plus an idempotent
+// function that unsubscribes (restoring Go's default, process-killing
+// disposition). Tests supply their own channel via Options.
+func (r *runner) subscribeSignals() (<-chan os.Signal, func()) {
+	if r.opts.signals != nil {
+		return r.opts.signals, func() {}
+	}
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+	return ch, func() { signal.Stop(ch) }
+}
+
+// watchSignals turns an interrupt into a clean cancellation of the whole run.
+//
+// The agent child deliberately runs in its own process group, so a Ctrl+C at the
+// terminal is delivered to codexmon alone. Without this, codexmon would die by
+// the default disposition — no finalizer, no teardown — and leave the agent
+// running unsupervised and unattributed, still consuming tokens against the
+// user's account with nothing left watching it. Instead we stop the agent's
+// group and let finalize record the run as cancelled, exactly as `codexmon
+// cancel` would. The same applies to a SIGTERM aimed at a detached worker.
+//
+// Only the first signal is handled; the subscription is then dropped, so a user
+// impatient with a slow shutdown can press Ctrl+C again and get the default kill.
+func (r *runner) watchSignals(cmd *exec.Cmd, sigC <-chan os.Signal, stopSignals func(), procExited <-chan struct{}, stop <-chan struct{}) {
+	var sig os.Signal
+	select {
+	// The agent is already gone in these two cases; hand SIGINT back to the
+	// runtime so a user who interrupts during the drain-and-finalize tail still
+	// gets out immediately instead of pressing a key that does nothing.
+	case <-procExited:
+		stopSignals()
+		return
+	case <-stop:
+		stopSignals()
+		return
+	case s, ok := <-sigC:
+		if !ok {
+			return
+		}
+		sig = s
+	}
+	stopSignals()
+	// select picks uniformly among ready cases, so a process that exited in the
+	// same instant the signal arrived may lose the draw. Re-check before
+	// committing a verdict — as the watchdog does — so a run that genuinely
+	// completed is never nondeterministically relabelled as cancelled.
+	select {
+	case <-procExited:
+		return
+	default:
+	}
+	r.mu.Lock()
+	if r.killState == "" {
+		r.killState = job.StateCancelled
+	}
+	if r.st.Error == "" {
+		r.st.Error = "interrupted by signal (" + sig.String() + ")"
+	}
+	r.mu.Unlock()
+	r.emit("received " + sig.String() + "; stopping " + r.agentName)
+	if cmd.Process != nil {
+		proc.TerminateGroup(cmd.Process.Pid, 3*time.Second)
+	}
+}
+
 // streamBufSize sizes the stream readers: agent JSON event lines routinely run
 // to tens of KiB (embedded tool output), so start well above bufio's 4 KiB
 // default to avoid repeated buffer growth on every long line.
@@ -291,9 +382,9 @@ const streamBufSize = 64 << 10
 func (r *runner) readStdout(stdout io.Reader) {
 	br := bufio.NewReaderSize(stdout, streamBufSize)
 	for {
-		line, err := br.ReadString('\n')
+		line, truncated, err := readLine(br, maxLineBytes)
 		if len(line) > 0 {
-			r.handleStdoutLine(line)
+			r.handleStdoutLine(line, truncated)
 		}
 		if err != nil {
 			return
@@ -301,12 +392,51 @@ func (r *runner) readStdout(stdout io.Reader) {
 	}
 }
 
-func (r *runner) handleStdoutLine(line string) {
+// lineTruncNotice marks output dropped because one line exceeded maxLineBytes.
+// Bounding memory is necessary, but doing it silently is not acceptable: a
+// reader must never mistake a truncated result for the agent's whole answer.
+const lineTruncNotice = "\n[codexmon: output line exceeded 8 MiB; the rest of that line was dropped]\n"
+
+// maxLineBytes caps how much of a single output line is held in memory. Agent
+// JSON events legitimately reach tens of KiB, so the ceiling is generous; its
+// only job is to keep one pathological line from being unbounded.
+const maxLineBytes = 8 << 20 // 8 MiB
+
+// readLine reads one newline-terminated line, keeping at most max bytes of it
+// and reporting whether anything had to be discarded.
+//
+// bufio's ReadString imposes no limit: it grows a buffer until the delimiter
+// arrives, so an agent that emits a huge blob with no newline can exhaust memory
+// before any downstream cap gets a chance to apply — the worker is OOM-killed
+// and the run is reported as the far more confusing "died without recording a
+// result". ReadSlice instead returns what fits in the fixed buffer, letting us
+// bound the copy and drop the overflow.
+func readLine(br *bufio.Reader, limit int) (line string, truncated bool, err error) {
+	var sb strings.Builder
+	for {
+		chunk, rerr := br.ReadSlice('\n')
+		room := limit - sb.Len()
+		if len(chunk) > room {
+			truncated = true
+			chunk = chunk[:max(room, 0)]
+		}
+		sb.Write(chunk) // copies; the slice aliases br's buffer
+		if rerr == bufio.ErrBufferFull {
+			continue // same line, more to come
+		}
+		return sb.String(), truncated, rerr
+	}
+}
+
+func (r *runner) handleStdoutLine(line string, truncated bool) {
 	r.touch()
 	if r.spec.JSONMode {
 		r.writeEvents(line)
 		ev, ok := r.provider.ParseLine(line)
 		if !ok {
+			if truncated {
+				r.emit("output line exceeded 8 MiB and was truncated; it could not be parsed as an event")
+			}
 			return
 		}
 		r.applyEvent(ev)
@@ -315,8 +445,42 @@ func (r *runner) handleStdoutLine(line string) {
 	// Non-JSON: tee raw output to the log and accumulate as the result.
 	r.writeLogRaw(line)
 	r.mu.Lock()
-	r.resultBuf.WriteString(line)
+	r.appendResultLocked(line)
 	r.mu.Unlock()
+	if truncated {
+		r.writeLogRaw(lineTruncNotice)
+		r.mu.Lock()
+		if !r.lineTruncNoted {
+			r.lineTruncNoted = true
+			// Written past the cap deliberately: if the buffer is already full,
+			// the marker explaining why is the one thing that must not be the
+			// piece that gets dropped.
+			r.resultBuf.WriteString(lineTruncNotice)
+		}
+		r.mu.Unlock()
+	}
+}
+
+// appendResultLocked accumulates non-JSON stdout as the run's result, bounded by
+// maxResultBufBytes. output.log is capped on disk, but this buffer lives in memory
+// for the whole run: uncapped, an agent that streams gigabytes to stdout would
+// OOM the worker, which then surfaces as the far more confusing "worker died
+// without recording a result". Caller holds r.mu.
+func (r *runner) appendResultLocked(line string) {
+	if r.resultCapped {
+		return
+	}
+	if room := maxResultBufBytes - r.resultBuf.Len(); len(line) > room {
+		// Keep the part that fits before giving up. Without this, an agent that
+		// emits one enormous unterminated blob — bufio imposes no line limit —
+		// would leave result.txt holding nothing but the truncation notice.
+		r.resultBuf.WriteString(agent.CutBytes(line, room))
+		r.resultBuf.WriteString("\n[output truncated: exceeded " +
+			strconv.Itoa(maxResultBufBytes>>20) + " MiB; full output in output.log]\n")
+		r.resultCapped = true
+		return
+	}
+	r.resultBuf.WriteString(line)
 }
 
 // applyEvent merges one normalized agent.Event into the live status: it advances
@@ -370,7 +534,7 @@ func (r *runner) applyEvent(ev agent.Event) {
 func (r *runner) readStderr(stderr io.Reader) {
 	br := bufio.NewReaderSize(stderr, streamBufSize)
 	for {
-		line, err := br.ReadString('\n')
+		line, _, err := readLine(br, maxLineBytes)
 		if len(line) > 0 {
 			trimmed := strings.TrimRight(line, "\r\n")
 			r.touch()
@@ -451,7 +615,12 @@ func (r *runner) watchdog(cmd *exec.Cmd, procExited <-chan struct{}, stop <-chan
 			default:
 			}
 			r.mu.Lock()
-			r.killState = killState
+			// Don't overwrite a verdict already reached: if an interrupt landed
+			// first, this run was cancelled, and a threshold that happens to
+			// expire during the termination grace must not relabel it a timeout.
+			if r.killState == "" {
+				r.killState = killState
+			}
 			if r.st.Error == "" {
 				r.st.Error = killReason // precise reason (names the stuck tool, idle, etc.)
 			}
@@ -526,13 +695,13 @@ func (r *runner) decideKill(lv liveness) (state job.State, reason string) {
 		if label == "" {
 			label = "tool call"
 		}
-		return job.StateStalled, "tool call " + label + " stuck for " + itoa(int(lv.oldestTool)) + "s (tool timeout " + itoa(int(t)) + "s)"
+		return job.StateStalled, "tool call " + label + " stuck for " + strconv.Itoa(int(lv.oldestTool)) + "s (tool timeout " + strconv.Itoa(int(t)) + "s)"
 	}
 	if t := th.StalledSec; t > 0 && !lv.cmdInFlight && !lv.toolInFlight && lv.idle >= t {
-		return job.StateStalled, "no activity for " + itoa(int(lv.idle)) + "s (stall ceiling " + itoa(int(t)) + "s)"
+		return job.StateStalled, "no activity for " + strconv.Itoa(int(lv.idle)) + "s (stall ceiling " + strconv.Itoa(int(t)) + "s)"
 	}
 	if t := th.WallSec; t > 0 && lv.elapsed >= t {
-		return job.StateTimeout, "wall-clock timeout after " + itoa(int(lv.elapsed)) + "s (limit " + itoa(int(t)) + "s)"
+		return job.StateTimeout, "wall-clock timeout after " + strconv.Itoa(int(lv.elapsed)) + "s (limit " + strconv.Itoa(int(t)) + "s)"
 	}
 	return "", ""
 }
@@ -583,9 +752,9 @@ func (r *runner) heartbeatLine(lv liveness, stderrTail []string) string {
 	last := r.st.LastEvent
 	r.mu.Unlock()
 	line := "♥ " + string(health) + " phase=" + phase +
-		" elapsed=" + itoa(int(lv.elapsed)) + "s idle=" + itoa(int(lv.idle)) + "s"
+		" elapsed=" + strconv.Itoa(int(lv.elapsed)) + "s idle=" + strconv.Itoa(int(lv.idle)) + "s"
 	if lv.toolInFlight {
-		line += " tool=\"" + lv.toolLabel + "\" tool_age=" + itoa(int(lv.oldestTool)) + "s"
+		line += " tool=\"" + lv.toolLabel + "\" tool_age=" + strconv.Itoa(int(lv.oldestTool)) + "s"
 	}
 	if last != "" {
 		line += " last=\"" + last + "\""
@@ -652,7 +821,7 @@ func (r *runner) finalize(cmd *exec.Cmd, waitErr error, resultFile string) *job.
 	r.st.ElapsedSec = round1(now.Sub(r.start).Seconds())
 	r.st.IdleSec = round1(now.Sub(r.lastActivity).Seconds())
 	r.persistLocked()
-	r.emit("done: state=" + string(r.st.State) + " elapsed=" + itoa(int(r.st.ElapsedSec)) + "s")
+	r.emit("done: state=" + string(r.st.State) + " elapsed=" + strconv.Itoa(int(r.st.ElapsedSec)) + "s")
 	return r.st
 }
 
@@ -674,9 +843,9 @@ func (r *runner) captureResultLocked(resultFile string) string {
 
 func (r *runner) failureMessageLocked(exitCode int) string {
 	if len(r.stderrTail) > 0 {
-		return r.agentName + " exited " + itoa(exitCode) + ": " + r.stderrTail[len(r.stderrTail)-1]
+		return r.agentName + " exited " + strconv.Itoa(exitCode) + ": " + r.stderrTail[len(r.stderrTail)-1]
 	}
-	return r.agentName + " exited with code " + itoa(exitCode)
+	return r.agentName + " exited with code " + strconv.Itoa(exitCode)
 }
 
 func (r *runner) persistLocked() {
@@ -706,7 +875,7 @@ func (r *runner) writeLogRaw(s string) {
 		return
 	}
 	if r.logBytes+int64(len(s)) > maxLogBytes {
-		_, _ = r.logF.WriteString("\n[log truncated: exceeded " + itoa(maxLogBytes>>20) + " MiB]\n")
+		_, _ = r.logF.WriteString("\n[log truncated: exceeded " + strconv.Itoa(maxLogBytes>>20) + " MiB]\n")
 		r.logCapped = true
 		return
 	}
@@ -726,7 +895,7 @@ func (r *runner) writeEvents(line string) {
 	if r.evBytes+int64(len(line)) > maxLogBytes {
 		// Mirror output.log's truncation notice so the events stream doesn't
 		// silently end; keep it valid JSONL so parsers don't choke.
-		_, _ = r.evF.WriteString(`{"type":"codexmon.truncated","note":"events capped at ` + itoa(maxLogBytes>>20) + ` MiB"}` + "\n")
+		_, _ = r.evF.WriteString(`{"type":"codexmon.truncated","note":"events capped at ` + strconv.Itoa(maxLogBytes>>20) + ` MiB"}` + "\n")
 		r.evCapped = true
 		return
 	}
@@ -774,27 +943,7 @@ func preview(s string, limit int) string {
 	if len(s) <= limit {
 		return s
 	}
-	return s[:limit] + "…"
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
+	// Cut on a rune boundary: this text is JSON-marshalled into status.json and
+	// printed by `codexmon status`, where a half-written rune shows up as U+FFFD.
+	return agent.CutBytes(s, limit) + "…"
 }

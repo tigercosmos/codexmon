@@ -288,50 +288,119 @@ func ReadStatus(dir string) (*Status, error) {
 	}
 	wasActive := s.State.Active()
 	workerDead := s.WorkerPID > 0 && !proc.Alive(s.WorkerPID)
+	fresh := !s.UpdatedAt.IsZero() && time.Since(s.UpdatedAt) <= orphanReapLimit
 	reconcileLiveness(&s)
 	if wasActive && !s.State.Active() {
-		// The job just reconciled to terminal because its worker is gone or
-		// wedged — two cleanups the dead worker can no longer perform itself:
-		//   1. reap an agent process group it orphaned (only when the worker is
-		//      definitively dead, and only if that pid is still alive, to avoid
-		//      killing a reused pid), and
-		//   2. persist the terminal status so anything reading status.json
-		//      directly — not just through this function — sees the real state.
-		if workerDead && s.AgentPID > 0 && proc.Alive(s.AgentPID) {
+		// Reap the agent process group the dead worker orphaned. Four guards
+		// stand between us and killing an innocent process that inherited a
+		// recycled pid: the status must be recent (a worker rewrites it every
+		// second, so a live orphan is always found within seconds of being
+		// abandoned — anything older is not worth the risk), the pid must still
+		// be alive, it must still lead its own group the way every agent child
+		// does, and — the decisive one — its process must have started inside
+		// this job's own launch window.
+		if workerDead && fresh && s.AgentPID > 0 && proc.Alive(s.AgentPID) &&
+			proc.IsGroupLeader(s.AgentPID) && proc.StartedBefore(s.AgentPID, s.StartedAt.Add(agentStartSlack)) {
 			proc.TerminateGroup(s.AgentPID, 2*time.Second)
 		}
-		_ = writeJSONAtomic(statusPath, &s) // best effort; a read must still return
+		// Persist the verdict so anything reading status.json directly — not
+		// just through this function — sees the real state. The one exception is
+		// a worker that is alive but has stopped updating: it may merely have
+		// been suspended, and writing "failed" under a run that then resumes
+		// would leave the record flip-flopping. That verdict stays in the value
+		// we return.
+		workerUnresponsive := !workerDead && s.WorkerPID > 0
+		if !workerUnresponsive {
+			_ = writeJSONAtomic(statusPath, &s) // best effort; a read must still return
+		}
 	}
 	return &s, nil
 }
 
-// workerStaleLimit is how long status.json may go un-updated before an active
-// job is treated as dead. The monitor rewrites status every watchdog tick (~1s),
-// so a gap this large means the writer is gone or wedged.
-const workerStaleLimit = 15 * time.Second
+const (
+	// workerWedgedLimit is how long an ALIVE worker's status.json may go
+	// un-updated before the job is reported dead. The monitor rewrites status
+	// every watchdog tick (~1s), so any gap means something is wrong — but a
+	// suspended laptop produces exactly the same signal, and both the worker and
+	// its poller resume together. The limit is therefore generous: a wedged run
+	// is reported minutes late, whereas a tight limit would report a perfectly
+	// healthy run as failed every time the machine woke up.
+	workerWedgedLimit = 10 * time.Minute
 
-// reconcileLiveness downgrades an active status whose worker can no longer be
-// updating it. The worker is the sole writer of status.json, so if it is gone —
-// or its pid was reused and the file has gone stale — the status can never
-// change again and must not be reported as still running.
+	// queuedStaleLimit bounds how long a job may sit "queued" with no worker pid
+	// recorded. The worker takes ownership of status.json as its first act, so a
+	// job still in the launcher's seed state past this window is debris — either
+	// a launcher killed mid-launch or a worker that died before it could write.
+	// It must age out, since Latest() prefers active jobs and such a job would
+	// otherwise shadow every later one forever. The window is wide enough to
+	// cover a worker that is merely slow to start on a loaded machine.
+	queuedStaleLimit = time.Minute
+
+	// agentStartSlack is how long after a job's recorded start its agent may have
+	// begun and still be considered that job's agent. codexmon spawns the agent
+	// within a second; the margin only absorbs a slow launch or a clock nudge.
+	agentStartSlack = 10 * time.Minute
+
+	// orphanReapLimit bounds how stale a status may be before ReadStatus stops
+	// signalling the agent pid recorded in it. It is generous on purpose:
+	// declining to reap leaves an agent running unwatched, which is the failure
+	// codexmon exists to prevent, so the bound only has to exclude records old
+	// enough that pid reuse is a genuine worry. `codexmon cancel` reaps an
+	// orphan regardless of age, since there the user has asked for it directly.
+	orphanReapLimit = time.Hour
+)
+
+// reconcileLiveness downgrades an active status that can no longer be advancing.
+// The worker is the sole writer of status.json, so if it is gone — or was never
+// spawned, or has stopped writing for long enough to be considered wedged — the
+// status can never change again and must not be reported as still running.
+//
+// Reconciliation is applied to the passed value; only the definitively-dead case
+// is persisted by ReadStatus, so a merely-suspended worker that wakes up keeps
+// its own record.
 func reconcileLiveness(s *Status) {
-	if s == nil || !s.State.Active() || s.WorkerPID <= 0 {
+	if s == nil || !s.State.Active() {
+		return
+	}
+	if s.WorkerPID <= 0 {
+		// No worker was ever recorded. Only a queued job can legitimately be in
+		// this state, and only briefly, between the launcher's seed write and
+		// its pid write.
+		if s.State == StateQueued && stalerThan(progressTime(s), queuedStaleLimit) {
+			markDead(s, "no worker process was ever recorded; the launch did not complete")
+		}
 		return
 	}
 	alive := proc.Alive(s.WorkerPID)
-	stale := !s.UpdatedAt.IsZero() && time.Since(s.UpdatedAt) > workerStaleLimit
-	if alive && !stale {
-		return
+	switch {
+	case !alive:
+		markDead(s, fmt.Sprintf("worker process %d is no longer running; the job ended without recording a result", s.WorkerPID))
+	case stalerThan(s.UpdatedAt, workerWedgedLimit):
+		markDead(s, fmt.Sprintf("status has not updated in %s; the worker appears wedged (or pid %d was reused)",
+			time.Since(s.UpdatedAt).Round(time.Second), s.WorkerPID))
 	}
+}
+
+// stalerThan reports whether t is set and older than d.
+func stalerThan(t time.Time, d time.Duration) bool {
+	return !t.IsZero() && time.Since(t) > d
+}
+
+// progressTime is the most recent moment a job is known to have made progress,
+// falling back to its start for a record written without an UpdatedAt.
+func progressTime(s *Status) time.Time {
+	if !s.UpdatedAt.IsZero() {
+		return s.UpdatedAt
+	}
+	return s.StartedAt
+}
+
+// markDead moves a status to failed/dead, keeping any error it already carries.
+func markDead(s *Status, reason string) {
 	s.State = StateFailed
 	s.Health = HealthDead
 	if s.Error == "" {
-		if !alive {
-			s.Error = fmt.Sprintf("worker process %d is no longer running; the job ended without recording a result", s.WorkerPID)
-		} else {
-			s.Error = fmt.Sprintf("status has not updated in %s; the worker appears wedged (or pid %d was reused)",
-				time.Since(s.UpdatedAt).Round(time.Second), s.WorkerPID)
-		}
+		s.Error = reason
 	}
 	if s.EndedAt == nil {
 		now := time.Now()
@@ -424,6 +493,10 @@ const (
 	defaultKeepAge   = 7 * 24 * time.Hour
 	defaultKeepCount = 200
 )
+
+// recentlyEndedGrace bounds how long after a job's recorded end its still-live
+// worker protects it from pruning. See Prune.
+const recentlyEndedGrace = 2 * workerWedgedLimit
 
 // unreadableGrace is the minimum age (by dir mtime) before a job directory with
 // no readable status may be pruned. A launch writes its seed status within
@@ -526,6 +599,25 @@ func Prune(opts PruneOptions) (removed int, err error) {
 			continue
 		}
 		if st.State.Active() {
+			continue
+		}
+		// A terminal verdict is not always proof the writer is gone: a worker
+		// that stopped updating long enough to look wedged reconciles to failed
+		// while its process is still there (a suspended machine does exactly
+		// this). Removing the directory would pull the log, events, and result
+		// files out from under a run that is about to resume writing them.
+		//
+		// The recency bound matters as much as the liveness probe: without it, an
+		// ancient job whose pid had been recycled by an unrelated process would be
+		// exempt from retention forever.
+		//
+		// This guard holds even for --all. A job whose worker is still running is
+		// not finished, whatever its record currently says, and removing the
+		// directory would strand that worker writing into deleted files with no
+		// status, no log, and no cancel marker — an unobservable process, which is
+		// the one outcome codexmon must never produce. "Remove every terminal job"
+		// has always excluded jobs that are still going.
+		if st.WorkerPID > 0 && !stalerThan(endedTime(st), recentlyEndedGrace) && proc.Alive(st.WorkerPID) {
 			continue
 		}
 		terminal = append(terminal, ended{dir: dir, at: endedTime(st)})

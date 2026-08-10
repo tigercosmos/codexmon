@@ -7,6 +7,8 @@ package proc
 
 import (
 	"os/exec"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -42,6 +44,103 @@ func Alive(pid int) bool {
 	}
 	// On Unix, signal 0 performs error checking without sending a signal.
 	return syscall.Kill(pid, 0) == nil
+}
+
+// IsGroupLeader reports whether pid still leads its own process group — the
+// shape codexmon gives every agent child via SetChildGroup.
+//
+// It exists to filter pid reuse before signalling a recorded pid: most processes
+// inherit their parent's group, so a recycled pid often fails this check. It is
+// only a cheap filter, not proof of identity — every shell job leader, every
+// detached codexmon worker, and every agent child leads a group — so callers
+// pair it with a freshness bound or an explicit user request.
+func IsGroupLeader(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	pgid, err := syscall.Getpgid(pid)
+	return err == nil && pgid == pid
+}
+
+// StartTime returns approximately when the process was started, and whether it
+// could be determined at all.
+//
+// It shells out to ps(1)'s elapsed-time column, which every Unix provides (macOS
+// has no `etimes`, so the `[[dd-]hh:]mm:ss` form is the portable one). Resolution
+// is one second, which is ample for its only purpose: telling codexmon's own
+// agent — started within a second of its job — apart from an unrelated process
+// that happens to have inherited the same pid much later.
+func StartTime(pid int) (time.Time, bool) {
+	if pid <= 0 {
+		return time.Time{}, false
+	}
+	out, err := exec.Command("ps", "-o", "etime=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return time.Time{}, false
+	}
+	elapsed, ok := parseETime(string(out))
+	if !ok {
+		return time.Time{}, false
+	}
+	return time.Now().Add(-elapsed), true
+}
+
+// parseETime parses ps(1)'s elapsed-time field: "mm:ss", "hh:mm:ss", or
+// "dd-hh:mm:ss".
+func parseETime(s string) (time.Duration, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	var days int
+	if dash := strings.IndexByte(s, '-'); dash >= 0 {
+		d, err := strconv.Atoi(s[:dash])
+		if err != nil || d < 0 {
+			return 0, false
+		}
+		days, s = d, s[dash+1:]
+	}
+	parts := strings.Split(s, ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0, false
+	}
+	var hours, mins, secs int
+	if len(parts) == 3 {
+		h, err := strconv.Atoi(parts[0])
+		if err != nil || h < 0 {
+			return 0, false
+		}
+		hours = h
+		parts = parts[1:]
+	}
+	m, err := strconv.Atoi(parts[0])
+	if err != nil || m < 0 {
+		return 0, false
+	}
+	sec, err := strconv.Atoi(parts[1])
+	if err != nil || sec < 0 {
+		return 0, false
+	}
+	mins, secs = m, sec
+	return time.Duration(days)*24*time.Hour +
+		time.Duration(hours)*time.Hour +
+		time.Duration(mins)*time.Minute +
+		time.Duration(secs)*time.Second, true
+}
+
+// StartedBefore reports whether pid's process began no later than t.
+//
+// This is the identity check that makes it safe to signal a pid read out of a
+// job file: codexmon's agent starts within a second of its job, so a pid that
+// began well after that window is a different process wearing a recycled number.
+// An indeterminate answer counts as "no" — declining to signal is always the
+// recoverable direction.
+func StartedBefore(pid int, t time.Time) bool {
+	started, ok := StartTime(pid)
+	if !ok {
+		return false
+	}
+	return !started.After(t)
 }
 
 // KillGroupNow sends an immediate SIGKILL to the whole process group led by

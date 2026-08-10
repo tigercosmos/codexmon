@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -52,7 +53,7 @@ func cmdDoctor(args []string) int {
 // distinctly from an ordinary failure.
 func doctorRun(timeout time.Duration, name string, args ...string) (string, error) {
 	out, err := runCapture(timeout, name, args...)
-	if err == context.DeadlineExceeded {
+	if errors.Is(err, context.DeadlineExceeded) {
 		return out, agent.ErrTimeout
 	}
 	return out, err

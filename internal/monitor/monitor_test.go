@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"bufio"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -8,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tigercosmos/codexmon/internal/agent"
 	"github.com/tigercosmos/codexmon/internal/job"
+	"github.com/tigercosmos/codexmon/internal/proc"
 )
 
 // fakeCodex is a stand-in for the codex binary so monitor tests need no network
@@ -507,5 +510,245 @@ func TestMonitorHungToolKilledByToolTimeout(t *testing.T) {
 	}
 	if time.Since(start) > 5*time.Second {
 		t.Errorf("tool timeout took too long: %s", time.Since(start))
+	}
+}
+
+// A Ctrl+C at the terminal reaches codexmon alone — the agent deliberately runs
+// in its own process group — so an unhandled interrupt would kill the supervisor
+// and leave the agent running unwatched. The run must instead stop the agent and
+// finalize as cancelled.
+func TestMonitorInterruptCancelsRunAndStopsAgent(t *testing.T) {
+	bin := writeFakeCodex(t)
+	t.Setenv("FAKE_MODE", "stall") // sleeps 30s; only the signal can end it
+	th := job.Thresholds{HeartbeatSec: 0, SlowAfterSec: 0, StalledSec: 0, ToolStuckSec: 0, WallSec: 0}
+	spec, dir, _ := newSpec(t, bin, true, []string{"exec", "--json"}, th)
+
+	// A channel stands in for the real subscription: delivering a genuine SIGINT
+	// to the test process would kill the test binary if it landed before the
+	// handler was installed.
+	sigs := make(chan os.Signal, 1)
+	done := make(chan *job.Status, 1)
+	go func() {
+		st, _ := Run(dir, spec, Options{signals: sigs})
+		done <- st
+	}()
+
+	// Interrupt only once the agent is actually up, so the test exercises a
+	// running child rather than a race with startup.
+	agentPID := waitForAgentPID(t, dir)
+	sigs <- os.Interrupt
+
+	var st *job.Status
+	select {
+	case st = <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("interrupted run never finished")
+	}
+	if st.State != job.StateCancelled {
+		t.Fatalf("state = %s, want cancelled (error=%q)", st.State, st.Error)
+	}
+	if !strings.Contains(st.Error, "signal") {
+		t.Errorf("error = %q, want it to name the signal", st.Error)
+	}
+	// The whole point: the agent must not outlive the interrupted supervisor.
+	deadline := time.Now().Add(3 * time.Second)
+	for proc.Alive(agentPID) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if proc.Alive(agentPID) {
+		t.Errorf("agent pid %d survived the interrupt", agentPID)
+	}
+}
+
+// waitForAgentPID blocks until the monitor has recorded the agent's pid.
+func waitForAgentPID(t *testing.T, dir string) int {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if st, err := job.ReadStatus(dir); err == nil && st.AgentPID > 0 {
+			return st.AgentPID
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("agent pid never appeared in status.json")
+	return 0
+}
+
+// In non-JSON mode every stdout line is accumulated in memory as the result. The
+// buffer must be capped: uncapped, a chatty agent would OOM the worker, which
+// then surfaces as the far more confusing "worker died without a result".
+func TestAppendResultIsCapped(t *testing.T) {
+	r := &runner{}
+	chunk := strings.Repeat("x", 64<<10) + "\n"
+	for r.resultBuf.Len() < maxResultBufBytes+len(chunk) {
+		before := r.resultBuf.Len()
+		r.appendResultLocked(chunk)
+		if r.resultBuf.Len() == before && !r.resultCapped {
+			t.Fatal("buffer stopped growing without being marked capped")
+		}
+		if r.resultCapped {
+			break
+		}
+	}
+	if !r.resultCapped {
+		t.Fatal("buffer never hit the cap")
+	}
+	if got := r.resultBuf.Len(); got > maxResultBufBytes+256 {
+		t.Errorf("buffer grew to %d bytes, want <= cap (%d) plus the notice", got, maxResultBufBytes)
+	}
+	if !strings.Contains(r.resultBuf.String(), "truncated") {
+		t.Error("a capped result should say so, not just stop")
+	}
+	// Further output is dropped rather than reopening the buffer.
+	capped := r.resultBuf.Len()
+	r.appendResultLocked(chunk)
+	if r.resultBuf.Len() != capped {
+		t.Error("writes after the cap should be dropped")
+	}
+}
+
+// output.log and events.jsonl are bounded on disk; past the cap each stops
+// appending and says so, instead of silently going quiet or filling the disk.
+func TestLogAndEventWritesAreCapped(t *testing.T) {
+	dir := t.TempDir()
+	logF, err := os.Create(filepath.Join(dir, "output.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logF.Close()
+	evF, err := os.Create(filepath.Join(dir, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer evF.Close()
+
+	// Start just under the cap so a single write crosses it.
+	r := &runner{logF: logF, evF: evF, logBytes: maxLogBytes - 8, evBytes: maxLogBytes - 8}
+	r.writeLogRaw(strings.Repeat("y", 64) + "\n")
+	r.writeEvents(`{"type":"noise"}` + "\n")
+	if !r.logCapped || !r.evCapped {
+		t.Fatalf("caps not tripped: log=%v events=%v", r.logCapped, r.evCapped)
+	}
+	r.writeLogRaw("more\n")
+	r.writeEvents(`{"type":"more"}` + "\n")
+
+	logged, _ := os.ReadFile(filepath.Join(dir, "output.log"))
+	if !strings.Contains(string(logged), "log truncated") {
+		t.Errorf("capped log should carry a truncation notice, got %q", string(logged))
+	}
+	if strings.Contains(string(logged), "more") {
+		t.Error("writes after the log cap should be dropped")
+	}
+	events, _ := os.ReadFile(filepath.Join(dir, "events.jsonl"))
+	if !strings.Contains(string(events), "codexmon.truncated") {
+		t.Errorf("capped events should carry a JSONL truncation notice, got %q", string(events))
+	}
+	if strings.Contains(string(events), `"more"`) {
+		t.Error("writes after the events cap should be dropped")
+	}
+}
+
+// panicProvider registers an agent whose parser panics, so the reader
+// goroutine's recover path can be exercised end to end.
+type panicProvider struct{ agent.Provider }
+
+func (panicProvider) Name() string            { return "panicagent" }
+func (panicProvider) BinEnv() string          { return "CODEXMON_PANICAGENT" }
+func (panicProvider) BinCandidates() []string { return []string{"panicagent"} }
+func (panicProvider) Analyze(args []string, _ string, allowJSON bool) agent.Analysis {
+	return agent.Analysis{JSONMode: allowJSON, Args: args, Title: "panicagent"}
+}
+func (panicProvider) ReviewArgs(agent.ReviewSpec) ([]string, error) { return nil, nil }
+func (panicProvider) ParseLine(string) (agent.Event, bool)          { panic("boom in ParseLine") }
+func (panicProvider) Doctor(string, agent.RunFunc) agent.DoctorReport {
+	return agent.DoctorReport{}
+}
+
+func init() { agent.Register(panicProvider{}) }
+
+// A panic inside a monitor goroutine must not leave the agent orphaned or the
+// run reported as clean: it tears the child down and finalizes as failed.
+func TestMonitorPanicInParserFailsRunAndKillsAgent(t *testing.T) {
+	bin := writeFakeCodex(t)
+	t.Setenv("FAKE_MODE", "stall") // emits one line, then sleeps 30s
+	th := job.Thresholds{HeartbeatSec: 0, SlowAfterSec: 0, StalledSec: 0, ToolStuckSec: 0, WallSec: 0}
+	spec, dir, _ := newSpec(t, bin, true, []string{"exec", "--json"}, th)
+	spec.Agent = "panicagent"
+
+	done := make(chan *job.Status, 1)
+	go func() {
+		st, _ := Run(dir, spec, Options{})
+		done <- st
+	}()
+	select {
+	case st := <-done:
+		if st.State != job.StateFailed {
+			t.Fatalf("state = %s, want failed after a parser panic", st.State)
+		}
+		if !strings.Contains(st.Error, "panic") {
+			t.Errorf("error = %q, want it to mention the panic", st.Error)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("a panicking parser hung the run instead of tearing it down")
+	}
+}
+
+// bufio's ReadString grows without limit until it finds a newline, so an agent
+// emitting a huge newline-free blob could exhaust memory before any downstream
+// cap applied. readLine bounds the copy and discards the overflow.
+func TestReadLineBoundsAHugeNewlineFreeChunk(t *testing.T) {
+	const max = 4096
+	// One line far larger than both the cap and the reader's own buffer, then a
+	// normal line after it.
+	huge := strings.Repeat("z", 5<<20)
+	br := bufio.NewReaderSize(strings.NewReader(huge+"\nsecond line\n"), 1024)
+
+	line, truncated, err := readLine(br, max)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if len(line) != max {
+		t.Errorf("kept %d bytes, want the cap of %d", len(line), max)
+	}
+	if !truncated {
+		t.Error("readLine must report that it dropped part of the line, or the loss is silent")
+	}
+	if strings.Trim(line, "z") != "" {
+		t.Error("the kept prefix should be the head of the line")
+	}
+	// The overflow must be discarded, not re-emitted as bogus extra lines.
+	next, nextTruncated, err := readLine(br, max)
+	if nextTruncated {
+		t.Error("a short line should not be reported as truncated")
+	}
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if next != "second line\n" {
+		t.Errorf("next line = %q, want the line that followed the huge one", next)
+	}
+}
+
+// Ordinary lines must be unaffected, including a final one with no newline.
+func TestReadLinePreservesNormalLines(t *testing.T) {
+	br := bufio.NewReaderSize(strings.NewReader("alpha\nbeta\nno trailing newline"), 64)
+	var got []string
+	for {
+		line, _, err := readLine(br, maxLineBytes)
+		if len(line) > 0 {
+			got = append(got, line)
+		}
+		if err != nil {
+			break
+		}
+	}
+	want := []string{"alpha\n", "beta\n", "no trailing newline"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d lines (%q), want %d", len(got), got, len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("line %d = %q, want %q", i, got[i], want[i])
+		}
 	}
 }

@@ -91,10 +91,10 @@ func TestAnalyzeInjectsStreamJSON(t *testing.T) {
 	if !a.JSONMode {
 		t.Fatalf("print run should be json-monitored: %+v", a)
 	}
-	if !hasFlag(a.Args, "--output-format") || !hasFlag(a.Args, "--verbose") {
+	if !agent.HasFlag(a.Args, "--output-format") || !agent.HasFlag(a.Args, "--verbose") {
 		t.Errorf("expected stream-json + verbose injected: %v", a.Args)
 	}
-	v, _ := flagValue(a.Args, "--output-format")
+	v, _ := agent.FlagValue(a.Args, "--output-format")
 	if v != "stream-json" {
 		t.Errorf("output-format = %q", v)
 	}
@@ -102,7 +102,7 @@ func TestAnalyzeInjectsStreamJSON(t *testing.T) {
 
 func TestAnalyzeNonPrintNoInject(t *testing.T) {
 	a := Provider{}.Analyze([]string{"mcp", "list"}, "", true)
-	if a.JSONMode || hasFlag(a.Args, "--output-format") {
+	if a.JSONMode || agent.HasFlag(a.Args, "--output-format") {
 		t.Errorf("non-print run must not be json-monitored: %+v", a)
 	}
 }
@@ -115,7 +115,7 @@ func TestAnalyzeRespectsExistingFormat(t *testing.T) {
 	}
 	// Caller already chose stream-json: keep it, add verbose, json mode on.
 	a = Provider{}.Analyze([]string{"-p", "x", "--output-format", "stream-json"}, "", true)
-	if !a.JSONMode || !hasFlag(a.Args, "--verbose") {
+	if !a.JSONMode || !agent.HasFlag(a.Args, "--verbose") {
 		t.Errorf("stream-json should stay json-monitored with verbose: %+v", a)
 	}
 	count := 0
@@ -134,14 +134,14 @@ func TestReviewArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !hasFlag(args, "-p") || !hasFlag(args, "--permission-mode") {
+	if !agent.HasFlag(args, "-p") || !agent.HasFlag(args, "--permission-mode") {
 		t.Errorf("review args = %v", args)
 	}
 	if !strings.Contains(strings.Join(args, " "), "read-only") {
 		t.Errorf("review prompt should be read-only: %v", args)
 	}
 	// The dedicated file-editing tools must be denied so a review can't mutate.
-	dis, ok := flagValue(args, "--disallowedTools")
+	dis, ok := agent.FlagValue(args, "--disallowedTools")
 	if !ok || !strings.Contains(dis, "Edit") || !strings.Contains(dis, "Write") {
 		t.Errorf("review should deny edit tools, got --disallowedTools=%q", dis)
 	}
@@ -157,5 +157,17 @@ func TestDoctorReadyOnVersion(t *testing.T) {
 	rep := Provider{}.Doctor("/bin/claude", run)
 	if !rep.Ready || rep.Version != "claude 2.1.0" {
 		t.Errorf("doctor = %+v", rep)
+	}
+}
+
+// A message whose content is a bare string (rather than a block array) must
+// still yield its text.
+func TestAssistantEventAcceptsBareStringContent(t *testing.T) {
+	ev, ok := Provider{}.ParseLine(`{"type":"assistant","message":{"role":"assistant","content":"just a string"}}`)
+	if !ok {
+		t.Fatal("line should parse")
+	}
+	if ev.Result != "just a string" {
+		t.Errorf("result = %q, want the bare string content", ev.Result)
 	}
 }

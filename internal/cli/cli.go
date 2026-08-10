@@ -40,7 +40,7 @@ USAGE
   codexmon tail [id] [-f] [-n N]           Show (or follow) a job's log
   codexmon list [--json]                   List recent jobs
   codexmon cancel [id]                     Stop a running job
-  codexmon clean [--keep-days N] [--keep N] [--all] Remove old finished jobs (never active ones)
+  codexmon clean [--keep-days N] [--keep N] [--all] Remove old finished jobs (never one still running)
   codexmon doctor [--agent A] [--json]     Check that the agent is installed and usable
   codexmon version [--agent A]             Print versions
 
@@ -612,7 +612,7 @@ func launchBackground(spec *job.Spec, dir string, jsonOut bool) int {
 	if err != nil {
 		return fail(err)
 	}
-	pid, err := spawnWorker(self, spec.ID, spec.Cwd, logFile)
+	pid, err := spawnWorker(self, spec.ID, spec.Cwd)
 	if err != nil {
 		// Don't leave the seeded job stuck as "queued" forever: with no worker
 		// pid, reconciliation can never age it out. Record it as failed.
@@ -625,8 +625,14 @@ func launchBackground(spec *job.Spec, dir string, jsonOut bool) int {
 		_ = job.WriteStatus(dir, seed)
 		return fail(fmt.Errorf("spawn background worker: %w", err))
 	}
+	// Deliberately NOT written back to status.json: from the moment it starts,
+	// the worker is the file's sole writer, and it records this same pid itself
+	// within milliseconds. A second writer here could only race — and the race it
+	// loses is the important one, overwriting a worker that failed instantly (a
+	// bad agent binary, say) with a stale "queued" that buries the real error. A
+	// launch that dies before the worker writes anything is caught instead by the
+	// stale-queued reconciliation in the job package.
 	seed.WorkerPID = pid
-	_ = job.WriteStatus(dir, seed)
 
 	if jsonOut {
 		printJSON(seed)
@@ -945,7 +951,12 @@ func cmdCancel(args []string) int {
 	}
 	if !st.State.Active() {
 		fmt.Printf("%s already finished (%s).\n", st.ID, st.State)
-		return 0
+		// "Finished" describes the job record, not necessarily the process. A
+		// worker that died without finalizing leaves its agent running, and the
+		// record reconciles to terminal on the first read — so a user who runs
+		// `cancel` after that point must still be able to stop the agent, or the
+		// only remaining option is to hunt the pid down by hand.
+		return reapOrphanedAgent(st)
 	}
 	// The marker is the graceful path: the owning worker's watchdog sees it,
 	// stops codex, and records a clean `cancelled` status within ~1 tick.
@@ -992,6 +1003,54 @@ func cmdCancel(args []string) int {
 		return 1
 	}
 	fmt.Printf("%s is now %s.\n", final.ID, final.State)
+	return 0
+}
+
+// agentStartSlack is how long after a job's recorded start its processes may
+// have begun and still be considered that job's own. codexmon spawns them within
+// a second; the margin only absorbs a slow launch or a clock nudge. It is a
+// variable solely so tests can narrow the window instead of waiting minutes.
+var agentStartSlack = 10 * time.Minute
+
+// reapOrphanedAgent stops an agent left behind by a worker that died without
+// finalizing. It is the explicit-intent counterpart to the automatic reap in
+// job.ReadStatus: that one declines to act on a status that has gone stale,
+// whereas here the user has asked for the process to stop, so age alone is no
+// bar — but the pid must still be verified to belong to this job.
+func reapOrphanedAgent(st *job.Status) int {
+	// A live worker pid is not by itself proof the worker is still there: for an
+	// old job that number may since have been handed to something unrelated, and
+	// believing it would abandon a genuinely orphaned agent. Verify identity the
+	// same way as for the agent.
+	if st.WorkerPID > 0 && alive(st.WorkerPID) && startedBefore(st.WorkerPID, st.StartedAt.Add(agentStartSlack)) {
+		// The worker owns the agent, so ask it to stop rather than killing its
+		// child out from under it — that is the graceful path, and it still takes
+		// effect if the worker is merely suspended and resumes later.
+		if st.Dir != "" {
+			_ = job.RequestCancel(st.Dir)
+		}
+		fmt.Printf("  %s worker pid %d is still alive; cancel requested — it owns the agent.\n", st.ID, st.WorkerPID)
+		return 0
+	}
+	if st.AgentPID <= 0 || !alive(st.AgentPID) || !isGroupLeader(st.AgentPID) {
+		return 0
+	}
+	// Being asked to cancel is not evidence that the recorded pid is still this
+	// job's agent. Verify identity by start time before signalling: an agent is
+	// spawned within a second of its job, so a process that began later is a
+	// different one that inherited a recycled pid, and killing it would be a
+	// serious, unrecoverable mistake.
+	if !startedBefore(st.AgentPID, st.StartedAt.Add(agentStartSlack)) {
+		fmt.Printf("  %s recorded agent pid %d, but that pid now belongs to a process that started\n"+
+			"  after the job did (or could not be identified); leaving it alone.\n", st.ID, st.AgentPID)
+		return 0
+	}
+	fmt.Printf("  %s left agent pid %d running; stopping it.\n", st.ID, st.AgentPID)
+	killGroup(st.AgentPID)
+	if alive(st.AgentPID) && isGroupLeader(st.AgentPID) {
+		fmt.Printf("  agent pid %d did not stop; kill it manually if it persists.\n", st.AgentPID)
+		return 1
+	}
 	return 0
 }
 
@@ -1079,7 +1138,9 @@ func readResult(st *job.Status) string {
 		return st.ResultPreview
 	}
 	if len(data) > maxResultBytes {
-		return string(data[:maxResultBytes]) + "\n…[result truncated at " + strconv.Itoa(maxResultBytes>>20) + " MiB; full text in " + st.ResultFile + "]"
+		// Cut on a rune boundary so the tail of the printed text isn't a mangled
+		// half-character.
+		return agent.CutBytes(string(data), maxResultBytes) + "\n…[result truncated at " + strconv.Itoa(maxResultBytes>>20) + " MiB; full text in " + st.ResultFile + "]"
 	}
 	return string(data)
 }

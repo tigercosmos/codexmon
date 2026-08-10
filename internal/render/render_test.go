@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tigercosmos/codexmon/internal/agent"
 	"github.com/tigercosmos/codexmon/internal/job"
@@ -96,5 +97,49 @@ func TestDurFormatting(t *testing.T) {
 	}
 	if durOff(600) != "10m00s" {
 		t.Errorf("durOff(600) = %q", durOff(600))
+	}
+}
+
+func TestDurUnits(t *testing.T) {
+	for _, tc := range []struct {
+		sec  float64
+		want string
+	}{
+		{0, "0s"},
+		{45, "45s"},
+		{59.9, "59s"},
+		{60, "1m00s"},
+		{125, "2m05s"},
+		{3599, "59m59s"},
+		{3600, "1h00m00s"},
+		{7503, "2h05m03s"},
+	} {
+		if got := dur(tc.sec); got != tc.want {
+			t.Errorf("dur(%v) = %q, want %q", tc.sec, got, tc.want)
+		}
+	}
+}
+
+// A failure detail can carry a provider's whole error payload; the human views
+// must stay readable while --json keeps the full text.
+func TestClampError(t *testing.T) {
+	short := "codex exited 1: boom"
+	if got := clampError(short); got != short {
+		t.Errorf("a short error should pass through unchanged, got %q", got)
+	}
+	long := strings.Repeat("é", 4096) // multi-byte, to catch a mid-rune cut
+	got := clampError(long)
+	if len(got) > maxErrorDisplay+64 {
+		t.Errorf("clamped error is %d bytes, want ~%d", len(got), maxErrorDisplay)
+	}
+	if !utf8.ValidString(got) {
+		t.Error("clamped error must remain valid UTF-8")
+	}
+	if !strings.Contains(got, "--json") {
+		t.Error("a clamped error should say where the full text is")
+	}
+	st := &job.Status{ID: "cdx-1", State: job.StateFailed, Health: job.HealthDead, Error: long}
+	if out := Status(st); len(out) > maxErrorDisplay+512 {
+		t.Errorf("status block grew to %d bytes on a huge error", len(out))
 	}
 }

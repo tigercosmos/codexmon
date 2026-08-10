@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/tigercosmos/codexmon/internal/agent"
+	"github.com/tigercosmos/codexmon/internal/proc"
 )
 
 func TestNewIDFormat(t *testing.T) {
@@ -211,14 +213,40 @@ func TestReconcileAliveWorkerUnchanged(t *testing.T) {
 	}
 }
 
-func TestReconcileSkipsWhenNoWorkerPID(t *testing.T) {
+// A job seeded moments ago has no worker pid yet — the launcher records it just
+// after spawning — so it must be left alone.
+func TestReconcileSkipsFreshQueuedJob(t *testing.T) {
 	t.Setenv("CODEXMON_HOME", t.TempDir())
 	id := NewID()
 	dir, _ := Dir(id)
-	_ = WriteStatus(dir, &Status{ID: id, State: StateQueued, StartedAt: time.Now()}) // WorkerPID 0
+	now := time.Now()
+	_ = WriteStatus(dir, &Status{ID: id, State: StateQueued, StartedAt: now, UpdatedAt: now}) // WorkerPID 0
 	st, _ := ReadStatus(dir)
 	if st.State != StateQueued {
-		t.Errorf("no-worker-pid status should not reconcile, got %s", st.State)
+		t.Errorf("freshly queued status should not reconcile, got %s", st.State)
+	}
+}
+
+// A queued job that never got a worker pid is debris from a launcher killed
+// mid-launch. It must age out: Latest() prefers active jobs, so leaving it
+// active would shadow every later job forever.
+func TestReconcileStaleQueuedJobWithoutWorker(t *testing.T) {
+	t.Setenv("CODEXMON_HOME", t.TempDir())
+	id := NewID()
+	dir, _ := Dir(id)
+	old := time.Now().Add(-queuedStaleLimit - time.Minute)
+	_ = WriteStatus(dir, &Status{ID: id, State: StateQueued, StartedAt: old, UpdatedAt: old}) // WorkerPID 0
+	st, _ := ReadStatus(dir)
+	if st.State != StateFailed {
+		t.Fatalf("stale queued job with no worker should reconcile to failed, got %s", st.State)
+	}
+	if st.Error == "" {
+		t.Error("reconciled job should explain why it failed")
+	}
+	// It must also stop shadowing `status`/`wait` with no id.
+	latest, err := Latest()
+	if err != nil || latest.State.Active() {
+		t.Errorf("Latest() should not report the zombie as active (err=%v)", err)
 	}
 }
 
@@ -246,19 +274,132 @@ func TestDirAndReadRejectTraversalID(t *testing.T) {
 	}
 }
 
-func TestReconcileStaleWorker(t *testing.T) {
+func TestReconcileWedgedWorker(t *testing.T) {
 	t.Setenv("CODEXMON_HOME", t.TempDir())
 	id := NewID()
 	dir, _ := Dir(id)
-	old := time.Now().Add(-time.Minute) // far past the staleness limit
+	old := time.Now().Add(-workerWedgedLimit - time.Minute)
 	_ = WriteStatus(dir, &Status{
 		ID: id, State: StateRunning, Health: HealthHealthy,
 		WorkerPID: os.Getpid(), StartedAt: old, UpdatedAt: old, // alive pid, but stale file
 	})
 	st, _ := ReadStatus(dir)
 	if st.State != StateFailed {
-		t.Errorf("alive-but-stale job should reconcile to failed (pid-reuse guard), got %s", st.State)
+		t.Errorf("alive-but-wedged job should reconcile to failed, got %s", st.State)
 	}
+}
+
+// A suspended laptop stops the worker's once-per-second status writes without
+// anything being wrong: on resume, the worker and its poller wake together and
+// the poller may read first. Briefly-stale-but-alive must therefore stay running
+// — and must not be persisted as failed, or the healthy run that resumes would
+// flip-flop between failed and running.
+func TestReconcileToleratesBriefStalenessWhileWorkerAlive(t *testing.T) {
+	t.Setenv("CODEXMON_HOME", t.TempDir())
+	id := NewID()
+	dir, _ := Dir(id)
+	old := time.Now().Add(-2 * time.Minute) // a nap, not a wedge
+	_ = WriteStatus(dir, &Status{
+		ID: id, State: StateRunning, Health: HealthHealthy,
+		WorkerPID: os.Getpid(), StartedAt: old, UpdatedAt: old,
+	})
+	st, _ := ReadStatus(dir)
+	if st.State != StateRunning {
+		t.Fatalf("briefly stale job with a live worker should stay running, got %s", st.State)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "status.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), string(StateFailed)) {
+		t.Error("a live worker's status must not be overwritten as failed on disk")
+	}
+}
+
+// The orphan reaper is the most dangerous line in this package: it signals a pid
+// recorded in a file. It must fire for a genuine orphan...
+func TestReconcileReapsOrphanedAgentGroup(t *testing.T) {
+	t.Setenv("CODEXMON_HOME", t.TempDir())
+	agentPID, exited := startGroupLeader(t)
+	id := NewID()
+	dir, _ := Dir(id)
+	now := time.Now()
+	_ = WriteStatus(dir, &Status{
+		ID: id, State: StateRunning, Health: HealthHealthy,
+		WorkerPID: reapedPID(t), AgentPID: agentPID,
+		StartedAt: now, UpdatedAt: now, // fresh status: the orphan was just abandoned
+	})
+	if _, err := ReadStatus(dir); err != nil {
+		t.Fatal(err)
+	}
+	if !exited(3 * time.Second) {
+		t.Error("a freshly orphaned agent group should have been terminated")
+	}
+}
+
+// ...and must NOT fire once the record is old enough that the pid may have been
+// recycled by an unrelated process.
+func TestReconcileLeavesStaleAgentPIDAlone(t *testing.T) {
+	t.Setenv("CODEXMON_HOME", t.TempDir())
+	agentPID, exited := startGroupLeader(t)
+	id := NewID()
+	dir, _ := Dir(id)
+	old := time.Now().Add(-orphanReapLimit - time.Minute)
+	_ = WriteStatus(dir, &Status{
+		ID: id, State: StateRunning, Health: HealthHealthy,
+		WorkerPID: reapedPID(t), AgentPID: agentPID,
+		StartedAt: old, UpdatedAt: old, // too old to trust the pid
+	})
+	if _, err := ReadStatus(dir); err != nil {
+		t.Fatal(err)
+	}
+	if exited(200 * time.Millisecond) {
+		t.Error("a pid from a stale record must not be signalled; it may have been reused")
+	}
+}
+
+// startGroupLeader launches a long sleep as the leader of its own process group
+// — the shape codexmon gives every agent child — and returns its pid plus a
+// predicate that reports whether it has exited within a deadline.
+//
+// Liveness is checked by waiting on the process, not by probing the pid: a
+// signalled child that has not yet been reaped is a zombie, and a signal-0 probe
+// still succeeds against a zombie, so probing would report a killed process as
+// alive.
+func startGroupLeader(t *testing.T) (pid int, exited func(time.Duration) bool) {
+	t.Helper()
+	cmd := exec.Command("sleep", "60")
+	proc.SetChildGroup(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid = cmd.Process.Pid
+	done := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(done) }()
+	t.Cleanup(func() {
+		proc.KillGroupNow(pid)
+		<-done
+	})
+	return pid, func(d time.Duration) bool {
+		select {
+		case <-done:
+			return true
+		case <-time.After(d):
+			return false
+		}
+	}
+}
+
+// reapedPID returns a pid that is certainly not running: a child is started, waited
+// on, and reaped, so nothing can be listening on that pid for the test's duration
+// (pid reuse aside, which the OS will not do this quickly).
+func reapedPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	return cmd.ProcessState.Pid()
 }
 
 // mkJob writes a job dir with a status in the given state, ended at the given
@@ -451,5 +592,59 @@ func TestStateActive(t *testing.T) {
 		if s.Active() {
 			t.Errorf("%s should be terminal", s)
 		}
+	}
+}
+
+// Even --all must not delete a job whose worker is still running. Such a job is
+// not finished, whatever its record says — a status can reconcile to "failed"
+// while a merely-suspended worker is still very much alive — and removing the
+// directory would strand it writing into deleted files with no status, no log,
+// and no cancel marker.
+func TestPruneAllStillProtectsALiveWorker(t *testing.T) {
+	t.Setenv("CODEXMON_HOME", t.TempDir())
+	live := NewID()
+	liveDir, _ := Dir(live)
+	now := time.Now()
+	_ = WriteStatus(liveDir, &Status{
+		ID: live, State: StateCompleted, Health: HealthDone,
+		WorkerPID: os.Getpid(), // alive
+		StartedAt: now, UpdatedAt: now, EndedAt: &now,
+	})
+	// A genuinely finished job alongside it, to prove --all still clears history.
+	done := mkJob(t, StateCompleted, now)
+
+	removed, err := Prune(PruneOptions{All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Errorf("--all removed %d jobs, want 1 (only the finished one)", removed)
+	}
+	if _, err := ReadStatus(liveDir); err != nil {
+		t.Error("the job with a live worker should have survived --all")
+	}
+	if _, err := ReadStatusByID(done); err == nil {
+		t.Error("the finished job should have been removed by --all")
+	}
+}
+
+// Routine retention, by contrast, leaves a job alone while its worker is still
+// running — deleting the directory would pull the files out from under it.
+func TestPruneSkipsJobWithLiveWorker(t *testing.T) {
+	t.Setenv("CODEXMON_HOME", t.TempDir())
+	id := NewID()
+	dir, _ := Dir(id)
+	now := time.Now()
+	_ = WriteStatus(dir, &Status{
+		ID: id, State: StateCompleted, Health: HealthDone,
+		WorkerPID: os.Getpid(),
+		StartedAt: now, UpdatedAt: now, EndedAt: &now,
+	})
+	removed, err := Prune(PruneOptions{MaxCount: 0, MaxAge: time.Nanosecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 0 {
+		t.Errorf("retention removed %d jobs, want 0 while the worker is alive", removed)
 	}
 }

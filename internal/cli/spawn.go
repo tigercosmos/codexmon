@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"time"
@@ -13,7 +14,7 @@ import (
 // spawnWorker launches a detached `codexmon __worker --job <id>` that owns the
 // codex child and survives the launching shell. Its stdio is sent to /dev/null;
 // all of its output goes to the job's files.
-func spawnWorker(self, id, cwd, _ string) (int, error) {
+func spawnWorker(self, id, cwd string) (int, error) {
 	devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
 		return 0, err
@@ -46,6 +47,17 @@ func alive(pid int) bool {
 	return proc.Alive(pid)
 }
 
+// isGroupLeader reports whether a pid still leads its own process group, the
+// shape codexmon gives every agent child.
+func isGroupLeader(pid int) bool {
+	return proc.IsGroupLeader(pid)
+}
+
+// startedBefore reports whether the process holding pid began no later than t.
+func startedBefore(pid int, t time.Time) bool {
+	return proc.StartedBefore(pid, t)
+}
+
 // runCapture runs a short command with a hard timeout and a /dev/null stdin,
 // returning combined output. The timeout protects doctor/version from the same
 // hangs codexmon exists to surface.
@@ -73,7 +85,10 @@ func runCapture(timeout time.Duration, name string, args ...string) (string, err
 	}
 	cmd.WaitDelay = 2 * time.Second
 	err := cmd.Run()
-	if ctx.Err() == context.DeadlineExceeded {
+	// Only call it a timeout if the command actually failed: one that exits
+	// successfully in the same instant the deadline expires has answered the
+	// question, and reporting a wedged install for it would be a lie.
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return buf.String(), context.DeadlineExceeded
 	}
 	return buf.String(), err

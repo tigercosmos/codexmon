@@ -81,7 +81,7 @@ func TestAnalyzeAndReview(t *testing.T) {
 	if !a.JSONMode {
 		t.Fatalf("print run should be json-monitored: %+v", a)
 	}
-	v, present := flagValue(a.Args, "--output-format")
+	v, present := agent.FlagValue(a.Args, "--output-format")
 	if !present || v != "stream-json" {
 		t.Errorf("output-format = %q present=%v", v, present)
 	}
@@ -90,7 +90,7 @@ func TestAnalyzeAndReview(t *testing.T) {
 	}
 
 	args, err := Provider{}.ReviewArgs(agent.ReviewSpec{Scope: agent.ScopeBase, Base: "main"})
-	if err != nil || !hasFlag(args, "-p") {
+	if err != nil || !agent.HasFlag(args, "-p") {
 		t.Fatalf("review args = %v (%v)", args, err)
 	}
 	if !strings.Contains(strings.Join(args, " "), "main") {
@@ -101,13 +101,13 @@ func TestAnalyzeAndReview(t *testing.T) {
 func TestAnalyzeDefaultsModel(t *testing.T) {
 	// No --model: codexmon defaults to Cursor Grok 4.5.
 	a := Provider{}.Analyze([]string{"-p", "review"}, "", true)
-	if v, present := flagValue(a.Args, "--model"); !present || v != "cursor-grok-4.5-high" {
+	if v, present := agent.FlagValue(a.Args, "--model"); !present || v != "cursor-grok-4.5-high" {
 		t.Errorf("default model = %q present=%v, want cursor-grok-4.5-high", v, present)
 	}
 
 	// Caller-specified model wins; codexmon must not append a second --model.
 	a = Provider{}.Analyze([]string{"-p", "review", "--model", "gpt-5"}, "", true)
-	if v, _ := flagValue(a.Args, "--model"); v != "gpt-5" {
+	if v, _ := agent.FlagValue(a.Args, "--model"); v != "gpt-5" {
 		t.Errorf("explicit model = %q, want gpt-5", v)
 	}
 	if got := strings.Count(strings.Join(a.Args, " "), "--model"); got != 1 {
@@ -178,5 +178,44 @@ func TestDoctorNeedsStatus(t *testing.T) {
 	}
 	if rep := (Provider{}).Doctor("/bin/cursor-agent", unauth); rep.Ready {
 		t.Error("doctor should not be ready when status fails")
+	}
+}
+
+// codexmon's default model belongs only on a headless run it is actually
+// monitoring. A management subcommand must be forwarded exactly as typed —
+// injecting --model into `cursor-agent status` would break a command that never
+// asked for a model.
+func TestAnalyzeLeavesSubcommandsAlone(t *testing.T) {
+	for _, sub := range [][]string{{"status"}, {"login"}, {"ls"}, {"--version"}} {
+		a := Provider{}.Analyze(sub, "", true)
+		if len(a.Args) != len(sub) {
+			t.Errorf("Analyze(%v) rewrote the args to %v; a subcommand must pass through verbatim", sub, a.Args)
+		}
+		if agent.HasFlag(a.Args, "--model") {
+			t.Errorf("Analyze(%v) injected --model into a subcommand: %v", sub, a.Args)
+		}
+		if a.JSONMode {
+			t.Errorf("Analyze(%v) should not claim JSON monitoring", sub)
+		}
+	}
+}
+
+// The model default still applies to the print-mode runs codexmon monitors.
+func TestAnalyzeStillDefaultsModelInPrintMode(t *testing.T) {
+	a := Provider{}.Analyze([]string{"-p", "review this"}, "", true)
+	if v, present := agent.FlagValue(a.Args, "--model"); !present || v != defaultModel {
+		t.Errorf("print-mode run should default the model, got %v", a.Args)
+	}
+}
+
+// A message whose content is a bare string (rather than a block array) must
+// still yield its text.
+func TestAssistantEventAcceptsBareStringContent(t *testing.T) {
+	ev, ok := Provider{}.ParseLine(`{"type":"assistant","message":{"role":"assistant","content":"just a string"}}`)
+	if !ok {
+		t.Fatal("line should parse")
+	}
+	if ev.Result != "just a string" {
+		t.Errorf("result = %q, want the bare string content", ev.Result)
 	}
 }

@@ -125,3 +125,56 @@ func TestProviderDoctor(t *testing.T) {
 		t.Error("timed-out doctor should not be ready")
 	}
 }
+
+// The fallback chain only hands off to another agent when it recognizes a usage
+// limit, and for codex the text it scans comes from this parser. A provider that
+// wraps the limit in a verbose envelope must not hide it: FailMsg is the full
+// message, even though the human summary stays one line.
+func TestParseLineKeepsLimitPhraseOutOfReachOfTheSummary(t *testing.T) {
+	line := `{"type":"turn.failed","error":{"code":"rate_limit","request_id":"req_01HZXQ8N4KJ2V7M3P9WQYB5TCD","details":"the model provider rejected this request after several retries and the turn could not be completed","message":"You have sent too many requests to the API. 429 Too Many Requests"}}`
+	ev, ok := Provider{}.ParseLine(line)
+	if !ok || !ev.Failure {
+		t.Fatalf("turn.failed should parse as a failure, got ok=%v failure=%v", ok, ev.Failure)
+	}
+	if !agent.IsLimitFailure(ev.FailMsg) {
+		t.Errorf("limit phrase was lost before fallback could see it; FailMsg = %q", ev.FailMsg)
+	}
+	if !strings.Contains(ev.FailMsg, "Too Many Requests") {
+		t.Errorf("FailMsg should carry the provider message, got %q", ev.FailMsg)
+	}
+	// The one-line summary stays short for humans.
+	if len(ev.Summary) > 200 {
+		t.Errorf("summary should stay display-sized, got %d bytes", len(ev.Summary))
+	}
+}
+
+// An `error` event carries its text in `message`; a nested error object is
+// unwrapped rather than shown as raw JSON.
+func TestFailureTextUnwrapsNestedMessage(t *testing.T) {
+	for _, tc := range []struct{ line, want string }{
+		{`{"type":"error","message":"Your workspace is out of credits"}`, "Your workspace is out of credits"},
+		{`{"type":"turn.failed","error":{"message":"usage limit reached"}}`, "usage limit reached"},
+	} {
+		ev, ok := Parse(tc.line)
+		if !ok {
+			t.Fatalf("parse %q", tc.line)
+		}
+		if got := ev.FailureText(); got != tc.want {
+			t.Errorf("FailureText() = %q, want %q", got, tc.want)
+		}
+		if !agent.IsLimitFailure(ev.FailureText()) {
+			t.Errorf("%q should be recognized as a limit failure", tc.line)
+		}
+	}
+}
+
+// An error payload that is not an object still surfaces, as raw JSON.
+func TestFailureTextFallsBackToRawPayload(t *testing.T) {
+	ev, ok := Parse(`{"type":"turn.failed","error":"plain string failure"}`)
+	if !ok {
+		t.Fatal("parse")
+	}
+	if got := ev.FailureText(); !strings.Contains(got, "plain string failure") {
+		t.Errorf("FailureText() = %q, want the raw payload", got)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tigercosmos/codexmon/internal/agent"
 	"github.com/tigercosmos/codexmon/internal/job"
 	"github.com/tigercosmos/codexmon/internal/proc"
 )
@@ -56,7 +57,7 @@ func Status(s *job.Status) string {
 		fmt.Fprintf(&b, "  exit:     %d\n", *s.ExitCode)
 	}
 	if s.Error != "" {
-		fmt.Fprintf(&b, "  error:    %s\n", s.Error)
+		fmt.Fprintf(&b, "  error:    %s\n", clampError(s.Error))
 	}
 	fmt.Fprintf(&b, "  log:      %s\n", s.LogFile)
 	if s.State.Active() {
@@ -85,7 +86,9 @@ func agentName(s *job.Status) string {
 
 // Line renders a compact one-line summary for list views.
 func Line(s *job.Status) string {
-	return fmt.Sprintf("%s %-28s %-10s %-11s %-13s elapsed=%-7s idle=%-6s %s",
+	// The duration columns are wide enough for the h/m/s form, so a run past an
+	// hour — exactly the kind codexmon exists to watch — keeps the table aligned.
+	return fmt.Sprintf("%s %-28s %-10s %-11s %-13s elapsed=%-9s idle=%-8s %s",
 		HealthIcon(s.Health), s.ID, s.State, s.Health, s.Phase,
 		dur(s.ElapsedSec), dur(s.IdleSec), s.Title)
 }
@@ -112,7 +115,7 @@ func Result(s *job.Status, fullResult string) string {
 	}
 	b.WriteByte('\n')
 	if s.Error != "" {
-		fmt.Fprintf(&b, "error: %s\n", s.Error)
+		fmt.Fprintf(&b, "error: %s\n", clampError(s.Error))
 	}
 	if strings.TrimSpace(fullResult) != "" {
 		b.WriteString("\n")
@@ -120,6 +123,21 @@ func Result(s *job.Status, fullResult string) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// maxErrorDisplay caps how much of a failure message the human-readable views
+// print. A failure detail can carry a provider's entire error payload — kept in
+// full so agent fallback can scan it for usage-limit phrases — which would
+// otherwise swamp a status block. The complete text stays in --json and
+// status.json.
+const maxErrorDisplay = 400
+
+func clampError(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= maxErrorDisplay {
+		return s
+	}
+	return agent.CutBytes(s, maxErrorDisplay) + "… (full text in --json)"
 }
 
 func orDash(s string) string {
@@ -131,12 +149,16 @@ func orDash(s string) string {
 
 func dur(sec float64) string {
 	d := time.Duration(sec * float64(time.Second))
-	if d < time.Minute {
+	switch {
+	case d < time.Minute:
 		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
+	default:
+		// Long runs are what codexmon exists to watch, so they get an hours
+		// unit rather than being reported as "125m03s".
+		return fmt.Sprintf("%dh%02dm%02ds", int(d.Hours()), int(d.Minutes())%60, int(d.Seconds())%60)
 	}
-	m := int(d.Minutes())
-	s := int(d.Seconds()) % 60
-	return fmt.Sprintf("%dm%02ds", m, s)
 }
 
 func durOff(sec float64) string {

@@ -601,3 +601,77 @@ func firstToken(s string) string {
 	}
 	return s
 }
+
+// Ctrl+C on a foreground run must stop the agent, not orphan it. The agent runs
+// in its own process group, so the interrupt reaches codexmon alone; without a
+// handler codexmon would die instantly and leave the agent running unwatched and
+// unattributed, still spending tokens. This drives the real binary end to end:
+// SIGINT goes to codexmon, and both the recorded job and the agent process must
+// come to rest.
+func TestE2EInterruptStopsAgent(t *testing.T) {
+	home := t.TempDir()
+	cmd := exec.Command(binPath, "run", "--wall-timeout", "0", "--idle-timeout", "0", "--", "exec", "go forever")
+	cmd.Env = append(os.Environ(),
+		"CODEXMON_HOME="+home,
+		"CODEXMON_CODEX="+fakePath,
+		"FAKE_MODE=stall",
+	)
+	var out, errBuf strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = &errBuf
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	// Interrupt only once the agent is genuinely up and recorded.
+	id, agentPID := waitForRunningAgent(t, home)
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatalf("codexmon ignored SIGINT; stderr=%s", errBuf.String())
+	}
+
+	// The agent must not outlive the supervisor that was watching it.
+	deadline := time.Now().Add(5 * time.Second)
+	for syscall.Kill(agentPID, 0) == nil && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if syscall.Kill(agentPID, 0) == nil {
+		_ = syscall.Kill(-agentPID, syscall.SIGKILL)
+		t.Errorf("agent pid %d survived the interrupt", agentPID)
+	}
+
+	// And the job must be recorded as cancelled, not left claiming to run.
+	s := runCodexmon(t, home, nil, "status", id, "--json")
+	if !strings.Contains(s.stdout, `"state": "cancelled"`) {
+		t.Errorf("interrupted job should be cancelled:\n%s", s.stdout)
+	}
+}
+
+// waitForRunningAgent blocks until some job in home reports a live agent pid,
+// returning the job id and that pid.
+func waitForRunningAgent(t *testing.T, home string) (string, int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		s := runCodexmon(t, home, nil, "status", "--json")
+		var st struct {
+			ID       string `json:"id"`
+			State    string `json:"state"`
+			AgentPID int    `json:"agent_pid"`
+		}
+		if json.Unmarshal([]byte(s.stdout), &st) == nil && st.State == "running" && st.AgentPID > 0 {
+			return st.ID, st.AgentPID
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("no job reached running with an agent pid")
+	return "", 0
+}

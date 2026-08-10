@@ -186,8 +186,15 @@ run is observable: `--json` + `--output-last-message` for `codex exec`,
 `--output-format stream-json --verbose` for `claude -p`, and
 `--output-format stream-json` for `cursor-agent -p`. Use `--no-json` to opt out;
 without a parseable stream, codexmon falls back to monitoring raw stdout/stderr
-activity. For Cursor, codexmon also defaults `--model cursor-grok-4.5-high`
-(Cursor Grok 4.5) unless you pass your own `--model`.
+activity. For a Cursor print-mode run, codexmon also defaults
+`--model cursor-grok-4.5-high` (Cursor Grok 4.5) unless you pass your own
+`--model`; management subcommands such as `cursor-agent status` are forwarded
+untouched.
+
+Interrupting a foreground run stops the agent too: Ctrl+C (or a `SIGTERM` to a
+detached worker) terminates the agent's process group and records the job as
+`cancelled`, so an interrupted run never leaves an agent working unwatched.
+Press Ctrl+C again to force-quit without waiting for the shutdown.
 
 ### Monitor flags (`run` / `start` / `review`)
 
