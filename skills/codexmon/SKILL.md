@@ -56,6 +56,7 @@ codexmon cancel "$ID"
   native invocation for whichever agent you pick.
   - Uncommitted changes: `codexmon review --agent <name> --uncommitted`
   - Against a base branch: `codexmon review --agent <name> --base main`
+  - Codex effort: add `--effort low|medium|high|xhigh|max|ultra`.
   - Add `-b` to run detached and poll (as above).
 - **Raw passthrough (full control):** anything that isn't a codexmon subcommand
   is passed to the selected agent verbatim, after `--`:

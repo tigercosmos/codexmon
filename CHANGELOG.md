@@ -4,6 +4,14 @@ All notable changes to codexmon are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor versions may change
 behavior).
 
+## Unreleased
+
+### Added
+
+- **Codex runs accept `--effort`.** Use `low`, `medium`, `high`, `xhigh`,
+  `max`, or `ultra` for raw tasks and `codexmon review`. codexmon maps the
+  value to Codex's `model_reasoning_effort` setting.
+
 ## v0.8.0
 
 Reliability fixes to process lifecycle, agent fallback, and retention.

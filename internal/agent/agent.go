@@ -144,6 +144,13 @@ type Provider interface {
 	Doctor(bin string, run RunFunc) DoctorReport
 }
 
+// EffortProvider is an optional provider capability for agents that expose a
+// reasoning-effort setting. The CLI uses it only when the caller passes
+// --effort; providers without this capability remain unchanged.
+type EffortProvider interface {
+	ApplyEffort(args []string, effort string) ([]string, error)
+}
+
 // ReviewPrompt builds a provider-neutral code-review instruction for agents that
 // have no purpose-built reviewer (Claude Code, Cursor). It tells the agent which
 // diff to look at and to stay strictly read-only.

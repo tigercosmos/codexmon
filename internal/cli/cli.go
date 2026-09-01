@@ -53,6 +53,7 @@ AGENT SELECTION (run/start/review/doctor/version)
 
 MONITOR FLAGS (run/start/review)
   -b, --background           Detach and return a job id immediately
+      --effort LEVEL         Codex effort: low|medium|high|xhigh|max|ultra
       --wall-timeout S       Hard wall-clock limit in seconds (0=off, default 600)
       --idle-timeout S       Kill after S idle seconds when nothing is in flight (0=off, default 180)
       --tool-timeout S       Kill if one MCP/tool call runs longer than S seconds (0=off, default 120)
@@ -127,7 +128,7 @@ func prepend(s string, rest []string) []string {
 func isMonitorFlag(name string) bool {
 	switch name {
 	case "-b", "--background", "--json", "--stdin", "--no-json",
-		"--agent", "--agent-bin", "--codex-bin", "-C", "--cwd",
+		"--agent", "--agent-bin", "--codex-bin", "--effort", "-C", "--cwd",
 		"--wall-timeout", "--idle-timeout", "--stall", "--tool-timeout",
 		"--slow-after", "--heartbeat":
 		return true
@@ -146,6 +147,7 @@ type runConfig struct {
 	cwd          string
 	agent        string
 	agentBin     string
+	effort       string
 	thresholds   job.Thresholds
 }
 
@@ -212,6 +214,8 @@ func (cfg *runConfig) applyCommonFlag(s *flagScan, name, attached string) (handl
 		cfg.agent, err = s.value(name, attached)
 	case "--agent-bin", "--codex-bin":
 		cfg.agentBin, err = s.value(name, attached)
+	case "--effort":
+		cfg.effort, err = s.value(name, attached)
 	case "-C", "--cwd":
 		cfg.cwd, err = s.value(name, attached)
 	case "--wall-timeout":
@@ -523,6 +527,18 @@ func launchChain(cfg runConfig, sel agentSelection, buildArgs func(agent.Provide
 // provider's monitoring flags, and persists the launch spec. A non-empty
 // titleOverride replaces the analyzed title.
 func buildJob(cfg runConfig, prov agent.Provider, agentName, bin string, args []string, titleOverride string) (*job.Spec, string, error) {
+	if cfg.effort != "" {
+		effortProvider, ok := prov.(agent.EffortProvider)
+		if !ok {
+			return nil, "", fmt.Errorf("--effort is not supported for agent %q", agentName)
+		}
+		var err error
+		args, err = effortProvider.ApplyEffort(args, cfg.effort)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+
 	cwd := cfg.cwd
 	if cwd == "" {
 		cwd, _ = os.Getwd()

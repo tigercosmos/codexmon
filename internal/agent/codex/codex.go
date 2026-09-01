@@ -13,6 +13,8 @@ type Provider struct{}
 
 func init() { agent.Register(Provider{}) }
 
+var _ agent.EffortProvider = Provider{}
+
 func (Provider) Name() string            { return "codex" }
 func (Provider) BinEnv() string          { return "CODEXMON_CODEX" }
 func (Provider) BinCandidates() []string { return []string{"codex"} }
@@ -21,6 +23,11 @@ func (Provider) BinCandidates() []string { return []string{"codex"} }
 // codex run observable. See the package-level Analyze.
 func (Provider) Analyze(args []string, resultFile string, allowJSON bool) agent.Analysis {
 	return Analyze(args, resultFile, allowJSON)
+}
+
+// ApplyEffort converts codexmon's --effort option to Codex's native config.
+func (Provider) ApplyEffort(args []string, effort string) ([]string, error) {
+	return ApplyEffort(args, effort)
 }
 
 // ReviewArgs builds a native `codex exec review` invocation; codex has a

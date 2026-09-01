@@ -201,6 +201,7 @@ Press Ctrl+C again to force-quit without waiting for the shutdown.
 | Flag | Default | Meaning |
 |---|---|---|
 | `--agent NAME` | `codex` | Which agent runs: `codex`, `claude`, or `cursor` (or set `CODEXMON_AGENT`) |
+| `--effort LEVEL` | `high` | Codex reasoning effort: `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` |
 | `-b, --background` | off | Detach and return a job id immediately |
 | `--wall-timeout S` | `600` | Hard wall-clock limit, seconds (`0` = off) |
 | `--idle-timeout S` | `180` | Kill after S idle seconds **when nothing is in flight** (`0` = off) |
@@ -217,6 +218,11 @@ Press Ctrl+C again to force-quit without waiting for the shutdown.
 > after a `--` separator; everything from the subcommand onward is passed to the
 > agent untouched: `codexmon start --agent claude --wall-timeout 900 -- -p "Review the diff"`.
 > `review` takes only the flags above plus `--uncommitted` / `--base REF`.
+
+`--effort` applies to Codex runs and maps to Codex's
+`model_reasoning_effort` setting. For example, use
+`codexmon review --agent codex --effort ultra --uncommitted`. Do not combine
+`--effort` with an explicit `-c model_reasoning_effort=...` option.
 
 ## The watchdog (what makes it "monitoring")
 

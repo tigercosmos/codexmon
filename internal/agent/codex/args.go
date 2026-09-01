@@ -1,6 +1,8 @@
 package codex
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/tigercosmos/codexmon/internal/agent"
@@ -79,6 +81,45 @@ func hasFlag(args []string, names ...string) bool {
 		}
 	}
 	return false
+}
+
+// ApplyEffort adds a caller-selected reasoning effort as a global Codex config
+// option. The values match the effort levels in the Codex model catalog.
+func ApplyEffort(args []string, effort string) ([]string, error) {
+	effort = strings.TrimSpace(effort)
+	if !isSupportedEffort(effort) {
+		return nil, fmt.Errorf("unsupported Codex effort %q (want low, medium, high, xhigh, max, or ultra)", effort)
+	}
+	if configIsSet(args, "model_reasoning_effort") {
+		return nil, errors.New("--effort cannot be combined with -c/--config model_reasoning_effort")
+	}
+
+	out := append([]string(nil), args...)
+	idx := subcommandIndex(out)
+	if idx < 0 {
+		idx = len(out)
+	}
+	return injectAt(out, idx, []string{"--config", "model_reasoning_effort=" + effort}), nil
+}
+
+func isSupportedEffort(effort string) bool {
+	switch effort {
+	case "low", "medium", "high", "xhigh", "max", "ultra":
+		return true
+	default:
+		return false
+	}
+}
+
+func configIsSet(args []string, key string) bool {
+	subIdx := subcommandIndex(args)
+	if subIdx < 0 {
+		return optionsHaveConfig(args, key, false)
+	}
+	if optionsHaveConfig(args[:subIdx], key, false) {
+		return true
+	}
+	return optionsHaveConfig(args[subIdx+1:], key, isExecToken(args[subIdx]))
 }
 
 // Analyze decides how to run codex. For `exec`, it defaults the model (and,

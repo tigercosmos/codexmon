@@ -74,6 +74,39 @@ func TestAnalyzeExecDefaultsModelAndReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestApplyEffortSupportsEveryCodexLevel(t *testing.T) {
+	for _, effort := range []string{"low", "medium", "high", "xhigh", "max", "ultra"} {
+		t.Run(effort, func(t *testing.T) {
+			args, err := ApplyEffort([]string{"exec", "hi"}, effort)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := Analyze(args, "", false)
+			want := "model_reasoning_effort=" + effort
+			if !reflect.DeepEqual(a.Args[:4], []string{"--config", want, "--model", defaultModel}) {
+				t.Errorf("configured args = %v, want effort %q and default model", a.Args, effort)
+			}
+		})
+	}
+}
+
+func TestApplyEffortRejectsUnsupportedAndDuplicateValues(t *testing.T) {
+	if _, err := ApplyEffort([]string{"exec", "hi"}, "none"); err == nil {
+		t.Error("unsupported effort should fail")
+	}
+	if _, err := ApplyEffort([]string{
+		"exec", "--config", "model_reasoning_effort=low", "hi",
+	}, "max"); err == nil {
+		t.Error("duplicate reasoning-effort settings should fail")
+	}
+	// Config-shaped prompt text is not a real duplicate.
+	if _, err := ApplyEffort([]string{
+		"exec", "explain", "--config", "model_reasoning_effort=low",
+	}, "max"); err != nil {
+		t.Errorf("prompt literal was treated as config: %v", err)
+	}
+}
+
 func TestAnalyzeExecRespectsModelAndReasoningOverrides(t *testing.T) {
 	a := Analyze([]string{
 		"--model", "custom-model",

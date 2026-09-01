@@ -190,6 +190,49 @@ func TestParseRunArgsAgent(t *testing.T) {
 	}
 }
 
+func TestParseEffort(t *testing.T) {
+	cfg, rest, err := parseRunArgs([]string{"--effort", "ultra", "--", "exec", "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.effort != "ultra" || !reflect.DeepEqual(rest, []string{"exec", "hi"}) {
+		t.Errorf("effort parse = %q, rest = %v", cfg.effort, rest)
+	}
+
+	cfg, _, err = parseReviewArgs([]string{"--agent", "codex", "--effort=max", "--uncommitted"})
+	if err != nil || cfg.effort != "max" {
+		t.Errorf("review effort = %q (%v)", cfg.effort, err)
+	}
+}
+
+func TestBuildJobAppliesCodexEffort(t *testing.T) {
+	t.Setenv("CODEXMON_HOME", t.TempDir())
+	prov, err := agent.Get("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, _, err := buildJob(runConfig{effort: "ultra"},
+		prov, "codex", "/bin/codex", []string{"exec", "hi"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(spec.Args[:4], []string{
+		"--config", "model_reasoning_effort=ultra", "--model", "gpt-5.6-sol",
+	}) {
+		t.Errorf("job args = %v", spec.Args)
+	}
+}
+
+func TestBuildJobRejectsEffortForUnsupportedAgent(t *testing.T) {
+	prov, err := agent.Get("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := buildJob(runConfig{effort: "high"}, prov, "claude", "/bin/claude", []string{"-p", "hi"}, ""); err == nil {
+		t.Error("--effort should fail for a provider without effort support")
+	}
+}
+
 func TestParseRunArgsAgentBinAlias(t *testing.T) {
 	// --codex-bin remains accepted as a back-compat alias for --agent-bin.
 	cfg, _, err := parseRunArgs([]string{"--codex-bin", "/x/codex", "exec"})
@@ -334,7 +377,7 @@ func TestResolveAgent(t *testing.T) {
 }
 
 func TestIsMonitorFlag(t *testing.T) {
-	for _, f := range []string{"--agent", "--wall-timeout", "-b", "--json", "-C", "--codex-bin"} {
+	for _, f := range []string{"--agent", "--effort", "--wall-timeout", "-b", "--json", "-C", "--codex-bin"} {
 		if !isMonitorFlag(f) {
 			t.Errorf("%q should be a monitor flag", f)
 		}
