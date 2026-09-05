@@ -19,6 +19,10 @@ those CLIs directly whenever you drive them non-interactively.
 Pick the agent with `--agent codex|claude|cursor` (on `run`/`start`/`review`/
 `doctor`/`version`) or the `CODEXMON_AGENT` env var. The default is `codex`.
 
+For `codex exec`, the default model is `gpt-6-astra` (GPT-6 Astra) with `high`
+reasoning effort. An explicit model or profile suppresses both defaults.
+Use `--effort low|medium|high|xhigh|max|ultra` to select another reasoning level.
+
 ## Prerequisites (check once)
 
 ```sh

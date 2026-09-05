@@ -89,7 +89,7 @@ supported agent CLI on your `PATH`: **`codex`** (default), **`claude`**
 
 ```sh
 # example: macOS (Apple Silicon) — substitute your version/os/arch
-curl -sSL https://github.com/tigercosmos/codexmon/releases/download/v0.9.0/codexmon_0.9.0_darwin_arm64.tar.gz \
+curl -sSL https://github.com/tigercosmos/codexmon/releases/download/v0.10.0/codexmon_0.10.0_darwin_arm64.tar.gz \
   | tar -xz codexmon && sudo mv codexmon /usr/local/bin/
 codexmon version
 ```
@@ -190,6 +190,10 @@ activity. For a Cursor print-mode run, codexmon also defaults
 `--model cursor-grok-4.5-high` (Cursor Grok 4.5) unless you pass your own
 `--model`; management subcommands such as `cursor-agent status` are forwarded
 untouched.
+
+For `codex exec`, codexmon defaults to `gpt-6-astra` (GPT-6 Astra) with `high`
+reasoning effort. An explicit model or profile suppresses both defaults.
+Use `--effort` to select another reasoning level.
 
 Interrupting a foreground run stops the agent too: Ctrl+C (or a `SIGTERM` to a
 detached worker) terminates the agent's process group and records the job as
@@ -409,7 +413,7 @@ cut by GoReleaser from a version tag, via
 [`.github/workflows/release.yml`](.github/workflows/release.yml):
 
 ```sh
-git tag v0.9.0 && git push origin v0.9.0     # CI builds + publishes the release
+git tag v0.10.0 && git push origin v0.10.0   # CI builds + publishes the release
 ```
 
 To build the same cross-platform archives locally (no goreleaser required):

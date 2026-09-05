@@ -4,6 +4,13 @@ All notable changes to codexmon are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor versions may change
 behavior).
 
+## v0.10.0
+
+### Changed
+
+- Codex exec runs now default to `gpt-6-astra` (GPT-6 Astra) with `high`
+  reasoning effort. Explicit model, profile, and effort overrides still apply.
+
 ## v0.9.0
 
 ### Added

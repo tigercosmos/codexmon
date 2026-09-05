@@ -217,7 +217,7 @@ func TestBuildJobAppliesCodexEffort(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(spec.Args[:4], []string{
-		"--config", "model_reasoning_effort=ultra", "--model", "gpt-5.6-sol",
+		"--config", "model_reasoning_effort=ultra", "--model", "gpt-6-astra",
 	}) {
 		t.Errorf("job args = %v", spec.Args)
 	}
