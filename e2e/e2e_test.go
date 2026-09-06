@@ -68,8 +68,11 @@ esac
 `
 
 // fakeClaude emits a Claude Code stream-json transcript so the multi-agent
-// review path can be exercised without a real Claude install.
+// review path can be exercised without a real Claude install. When
+// FAKE_ARGS_FILE is set it also records its argv there, so a test can assert on
+// the flags codexmon injected.
 const fakeClaude = `#!/bin/sh
+[ -n "$FAKE_ARGS_FILE" ] && printf '%s\n' "$@" > "$FAKE_ARGS_FILE"
 case "$1" in
   --version) echo "fake-claude 9.9.9"; exit 0 ;;
   doctor)    echo "claude: all good"; exit 0 ;;
@@ -388,6 +391,70 @@ func TestE2EReviewMultiAgent(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestE2EClaudeDefaultModel proves a monitored Claude run reaches the CLI with
+// the pinned model, and that a caller-chosen model is passed through untouched.
+func TestE2EClaudeDefaultModel(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		home := t.TempDir()
+		argsFile := filepath.Join(t.TempDir(), "args")
+		r := runCodexmon(t, home, []string{"FAKE_ARGS_FILE=" + argsFile},
+			"review", "--agent", "claude", "--uncommitted")
+		if r.code != 0 {
+			t.Fatalf("review exit = %d, stderr=%s", r.code, r.stderr)
+		}
+		got := fakeArgs(t, argsFile)
+		if v := flagValue(got, "--model"); v != "claude-fable-5-1" {
+			t.Errorf("claude ran with --model %q, want claude-fable-5-1: %v", v, got)
+		}
+	})
+
+	t.Run("caller model wins", func(t *testing.T) {
+		home := t.TempDir()
+		argsFile := filepath.Join(t.TempDir(), "args")
+		r := runCodexmon(t, home, []string{"FAKE_ARGS_FILE=" + argsFile},
+			"run", "--agent", "claude", "--", "-p", "hi", "--model", "opus")
+		if r.code != 0 {
+			t.Fatalf("run exit = %d, stderr=%s", r.code, r.stderr)
+		}
+		got := fakeArgs(t, argsFile)
+		if v := flagValue(got, "--model"); v != "opus" {
+			t.Errorf("claude ran with --model %q, want opus: %v", v, got)
+		}
+		if n := countOf(got, "--model"); n != 1 {
+			t.Errorf("--model appeared %d times, want 1: %v", n, got)
+		}
+	})
+}
+
+// fakeArgs reads the argv a fake agent recorded (one argument per line).
+func fakeArgs(t *testing.T, path string) []string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read recorded args: %v", err)
+	}
+	return strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+}
+
+func flagValue(args []string, name string) string {
+	for i, a := range args {
+		if a == name && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func countOf(args []string, name string) int {
+	n := 0
+	for _, a := range args {
+		if a == name {
+			n++
+		}
+	}
+	return n
 }
 
 func TestE2EDoctorMultiAgent(t *testing.T) {

@@ -105,6 +105,44 @@ func TestAnalyzeNonPrintNoInject(t *testing.T) {
 	if a.JSONMode || agent.HasFlag(a.Args, "--output-format") {
 		t.Errorf("non-print run must not be json-monitored: %+v", a)
 	}
+	// A management subcommand may reject an unexpected --model, so it must be
+	// forwarded exactly as written.
+	if agent.HasFlag(a.Args, "--model") {
+		t.Errorf("non-print run must not get a model: %v", a.Args)
+	}
+}
+
+func TestAnalyzeDefaultsModel(t *testing.T) {
+	// No --model: codexmon pins Claude Fable 5.1.
+	a := Provider{}.Analyze([]string{"-p", "review my diff"}, "", true)
+	if v, present := agent.FlagValue(a.Args, "--model"); !present || v != defaultModel {
+		t.Errorf("default model = %q present=%v, want %s", v, present, defaultModel)
+	}
+
+	// Caller-specified model wins; codexmon must not append a second --model.
+	a = Provider{}.Analyze([]string{"-p", "review", "--model", "opus"}, "", true)
+	if v, _ := agent.FlagValue(a.Args, "--model"); v != "opus" {
+		t.Errorf("caller model should win, got %q: %v", v, a.Args)
+	}
+	if got := strings.Count(strings.Join(a.Args, " "), "--model"); got != 1 {
+		t.Errorf("--model count = %d, want exactly 1: %v", got, a.Args)
+	}
+
+	// The --model=value form is also honored.
+	a = Provider{}.Analyze([]string{"-p", "review", "--model=claude-opus-5"}, "", true)
+	if got := strings.Count(strings.Join(a.Args, " "), "--model"); got != 1 {
+		t.Errorf("--model=value count = %d, want 1: %v", got, a.Args)
+	}
+
+	// The model default is independent of JSON monitoring: --no-json still runs
+	// on a known model.
+	a = Provider{}.Analyze([]string{"-p", "review"}, "", false)
+	if v, present := agent.FlagValue(a.Args, "--model"); !present || v != defaultModel {
+		t.Errorf("model with json disabled = %q present=%v", v, present)
+	}
+	if a.JSONMode {
+		t.Errorf("json must stay off: %+v", a)
+	}
 }
 
 func TestAnalyzeRespectsExistingFormat(t *testing.T) {

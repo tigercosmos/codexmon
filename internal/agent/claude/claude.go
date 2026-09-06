@@ -1,7 +1,8 @@
 // Package claude adapts Anthropic's Claude Code CLI (`claude`) to codexmon's
 // agent contract. A headless review runs `claude -p "<prompt>"`; to make it
-// observable, codexmon adds `--output-format stream-json --verbose`, then parses
-// the resulting newline-delimited event stream:
+// observable, codexmon adds `--output-format stream-json --verbose`, defaults
+// `--model claude-fable-5-1` (unless the caller picked a model), then parses the
+// resulting newline-delimited event stream:
 //
 //	{"type":"system","subtype":"init","session_id":"...","model":"..."}
 //	{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{...}}]}}
@@ -23,6 +24,13 @@ import (
 	"github.com/tigercosmos/codexmon/internal/agent"
 )
 
+// defaultModel is the Claude model codexmon selects when the caller hasn't
+// chosen one with --model. Claude Code's own default follows the user's account
+// setting; we pin Claude Fable 5.1 so headless runs use a known model. The full
+// name is used rather than the `fable` alias so the model can't shift under a
+// stored run when the alias moves to a later release.
+const defaultModel = "claude-fable-5-1"
+
 // Provider drives the Claude Code CLI.
 type Provider struct{}
 
@@ -35,11 +43,22 @@ func (Provider) BinCandidates() []string { return []string{"claude"} }
 // Analyze adds the streaming-JSON flags for a headless (`-p`) run so codexmon
 // can monitor the event stream and capture the result. It only does so for a
 // print-mode run (interactive `claude` cannot be event-monitored), and respects
-// an output format the caller already chose.
+// an output format the caller already chose. A print-mode run also gets the
+// default model unless the caller picked one.
+//
+// Both injections are gated on print mode, mirroring how the codex adapter gates
+// on `exec` and the cursor adapter on `-p`: only a headless run takes a model,
+// and a management subcommand (`claude mcp list`, `claude doctor`, …) must be
+// forwarded exactly as the user wrote it — one that rejects an unexpected
+// --model would fail for a flag codexmon added behind their back.
 func (Provider) Analyze(args []string, _ string, allowJSON bool) agent.Analysis {
 	out := append([]string(nil), args...)
+	printMode := agent.HasFlag(args, "-p", "--print")
+	if printMode && !agent.HasFlag(args, "--model") {
+		out = append(out, "--model", defaultModel)
+	}
 	jsonMode := false
-	if allowJSON && agent.HasFlag(args, "-p", "--print") {
+	if allowJSON && printMode {
 		val, present := agent.FlagValue(args, "--output-format")
 		switch {
 		case !present:

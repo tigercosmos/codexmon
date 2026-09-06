@@ -89,7 +89,7 @@ supported agent CLI on your `PATH`: **`codex`** (default), **`claude`**
 
 ```sh
 # example: macOS (Apple Silicon) — substitute your version/os/arch
-curl -sSL https://github.com/tigercosmos/codexmon/releases/download/v0.10.0/codexmon_0.10.0_darwin_arm64.tar.gz \
+curl -sSL https://github.com/tigercosmos/codexmon/releases/download/v0.11.0/codexmon_0.11.0_darwin_arm64.tar.gz \
   | tar -xz codexmon && sudo mv codexmon /usr/local/bin/
 codexmon version
 ```
@@ -186,9 +186,10 @@ run is observable: `--json` + `--output-last-message` for `codex exec`,
 `--output-format stream-json --verbose` for `claude -p`, and
 `--output-format stream-json` for `cursor-agent -p`. Use `--no-json` to opt out;
 without a parseable stream, codexmon falls back to monitoring raw stdout/stderr
-activity. For a Cursor print-mode run, codexmon also defaults
-`--model cursor-grok-4.5-high` (Cursor Grok 4.5) unless you pass your own
-`--model`; management subcommands such as `cursor-agent status` are forwarded
+activity. A print-mode run also gets a pinned model unless you pass your own
+`--model`: `claude-fable-5-1` (Claude Fable 5.1) for `claude -p` and
+`cursor-grok-4.5-high` (Cursor Grok 4.5) for `cursor-agent -p`. Management
+subcommands such as `claude mcp list` or `cursor-agent status` are forwarded
 untouched.
 
 For `codex exec`, codexmon defaults to `gpt-6-astra` (GPT-6 Astra) with `high`
@@ -413,7 +414,7 @@ cut by GoReleaser from a version tag, via
 [`.github/workflows/release.yml`](.github/workflows/release.yml):
 
 ```sh
-git tag v0.10.0 && git push origin v0.10.0   # CI builds + publishes the release
+git tag v0.11.0 && git push origin v0.11.0   # CI builds + publishes the release
 ```
 
 To build the same cross-platform archives locally (no goreleaser required):

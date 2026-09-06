@@ -4,6 +4,15 @@ All notable changes to codexmon are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor versions may change
 behavior).
 
+## v0.11.0
+
+### Changed
+
+- Headless `claude -p` runs now default to `claude-fable-5-1` (Claude Fable
+  5.1), matching how codexmon already pins a model for `codex exec` and
+  `cursor-agent -p`. An explicit `--model` still wins, and management
+  subcommands (`claude mcp list`, `claude doctor`, …) are forwarded untouched.
+
 ## v0.10.0
 
 ### Changed

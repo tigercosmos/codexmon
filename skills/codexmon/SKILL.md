@@ -23,6 +23,10 @@ For `codex exec`, the default model is `gpt-6-astra` (GPT-6 Astra) with `high`
 reasoning effort. An explicit model or profile suppresses both defaults.
 Use `--effort low|medium|high|xhigh|max|ultra` to select another reasoning level.
 
+Headless `claude -p` runs default to `claude-fable-5-1` (Claude Fable 5.1) and
+`cursor-agent -p` runs to `cursor-grok-4.5-high` (Cursor Grok 4.5). Pass your own
+`--model` to override either.
+
 ## Prerequisites (check once)
 
 ```sh
