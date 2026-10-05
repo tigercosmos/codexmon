@@ -17,7 +17,8 @@ collect the result without ever blocking on a silent hang. Prefer it over callin
 those CLIs directly whenever you drive them non-interactively.
 
 Pick the agent with `--agent codex|claude|cursor` (on `run`/`start`/`review`/
-`doctor`/`version`) or the `CODEXMON_AGENT` env var. The default is `codex`.
+`doctor`/`models`/`version`) or the `CODEXMON_AGENT` env var. The default is
+`codex`.
 
 For `codex exec`, the default model is `gpt-6-astra` (GPT-6 Astra) with `high`
 reasoning effort. An explicit model or profile suppresses both defaults.
@@ -26,6 +27,22 @@ Use `--effort low|medium|high|xhigh|max|ultra` to select another reasoning level
 Headless `claude -p` runs default to `claude-fable-5-1` (Claude Fable 5.1) and
 `cursor-agent -p` runs to `cursor-grok-4.5-high` (Cursor Grok 4.5). Pass your own
 `--model` to override either.
+
+List current choices with `codexmon models --agent codex|claude [--json]`.
+Codex choices: `gpt-6-astra` (default), `gpt-6.1-sol`, `gpt-6-sol`,
+`gpt-6-luna`.
+Claude choices: `claude-fable-5-1` (default), `claude-opus-5-5`,
+`claude-sonnet-5-5`, `claude-haiku-4-5`. Account and CLI availability can
+differ.
+Native `--model` arguments remain unrestricted, including models outside the
+list.
+
+`codexmon models --agent cursor` forwards Cursor's native model list through
+the monitor. With Cursor, `--json` returns monitored job status and result.
+The command recognizes codexmon flags anywhere before `--`. To forward
+conflicting flags to Cursor, put them after `--`.
+To reach Cursor's native command directly, use
+`codexmon run --agent cursor -- models`.
 
 ## Prerequisites (check once)
 

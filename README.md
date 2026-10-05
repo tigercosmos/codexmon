@@ -89,7 +89,7 @@ supported agent CLI on your `PATH`: **`codex`** (default), **`claude`**
 
 ```sh
 # example: macOS (Apple Silicon) — substitute your version/os/arch
-curl -sSL https://github.com/tigercosmos/codexmon/releases/download/v0.11.0/codexmon_0.11.0_darwin_arm64.tar.gz \
+curl -sSL https://github.com/tigercosmos/codexmon/releases/download/v0.12.0/codexmon_0.12.0_darwin_arm64.tar.gz \
   | tar -xz codexmon && sudo mv codexmon /usr/local/bin/
 codexmon version
 ```
@@ -136,8 +136,8 @@ codexmon wait   "$ID"          # block until done, print the result
 ```
 
 > **Picking the agent.** `--agent codex|claude|cursor` (on `run`/`start`/
-> `review`/`doctor`/`version`) or the `CODEXMON_AGENT` env var selects who runs;
-> the default is `codex`, so every existing command keeps working unchanged.
+> `review`/`doctor`/`models`/`version`) or the `CODEXMON_AGENT` env var selects
+> the agent. The default is `codex`.
 >
 > **Fallback when no backend is specified.** With neither `--agent` nor
 > `CODEXMON_AGENT` set, codexmon walks a fallback chain — **codex → claude →
@@ -167,6 +167,7 @@ subcommand is passed to the selected agent verbatim**, wrapped in monitoring.
 | `codexmon cancel [id]` | Stop a running job |
 | `codexmon clean [--keep-days N] [--keep N] [--all]` | Remove old finished jobs (active jobs are never touched) |
 | `codexmon doctor [--agent A] [--json]` | Check that the agent is installed and responding |
+| `codexmon models [--agent A] [--json]` | List curated Codex/Claude choices or Cursor's native models |
 | `codexmon version [--agent A]` | Print codexmon and agent versions |
 
 `codexmon review` is the agent-neutral path: it builds each agent's native review
@@ -195,6 +196,49 @@ untouched.
 For `codex exec`, codexmon defaults to `gpt-6-astra` (GPT-6 Astra) with `high`
 reasoning effort. An explicit model or profile suppresses both defaults.
 Use `--effort` to select another reasoning level.
+
+### Model choices
+
+Run `codexmon models --agent codex` or `codexmon models --agent claude` to see
+the current choices. Add `--json` for machine-readable output. The command uses
+`CODEXMON_AGENT` when `--agent` is absent. If neither is set, the command
+defaults to Codex.
+
+For Codex and Claude, text output contains only the table; the informational
+note goes to stderr. JSON output contains the agent name and curated models.
+For Cursor, the command forwards `models` and native arguments through the
+monitor. Its `--json` output contains the monitored job status and result.
+
+The command recognizes codexmon flags anywhere before `--`. To forward
+conflicting flags to Cursor, put them after `--`.
+
+The `models` command now belongs to codexmon. To reach Cursor's native
+command directly, use `codexmon run --agent cursor -- models`.
+
+The defaults prioritize capability for demanding work. These choices follow
+the [OpenAI model documentation](https://learn.chatgpt.com/docs/models) and
+[Claude model documentation](https://platform.claude.com/docs/en/models/overview),
+checked on October 5, 2026.
+
+| Agent | Model ID | Role |
+|---|---|---|
+| Codex | `gpt-6-astra` | Default; highest capability |
+| Codex | `gpt-6.1-sol` | Near-Astra performance at a lower cost |
+| Codex | `gpt-6-sol` | Previous-generation workhorse |
+| Codex | `gpt-6-luna` | Fast, efficient model for focused tasks |
+| Claude | `claude-fable-5-1` | Default; demanding reasoning and long-horizon work |
+| Claude | `claude-opus-5-5` | Long-running agentic coding and knowledge work |
+| Claude | `claude-sonnet-5-5` | Balanced speed and intelligence |
+| Claude | `claude-haiku-4-5` | Fast, efficient model for focused tasks |
+
+The list contains curated choices; account and CLI availability can differ.
+Native model arguments remain unrestricted, including models outside the list.
+For example:
+
+```sh
+codexmon run --agent codex -- exec --model gpt-6.1-sol "Review the current changes"
+codexmon run --agent claude -- -p "Review the current changes" --model claude-opus-5-5
+```
 
 Interrupting a foreground run stops the agent too: Ctrl+C (or a `SIGTERM` to a
 detached worker) terminates the agent's process group and records the job as
@@ -414,7 +458,7 @@ cut by GoReleaser from a version tag, via
 [`.github/workflows/release.yml`](.github/workflows/release.yml):
 
 ```sh
-git tag v0.11.0 && git push origin v0.11.0   # CI builds + publishes the release
+git tag v0.12.0 && git push origin v0.12.0   # CI builds + publishes the release
 ```
 
 To build the same cross-platform archives locally (no goreleaser required):

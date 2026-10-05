@@ -88,9 +88,16 @@ esac
 
 // fakeCursor emits a Cursor agent stream-json transcript.
 const fakeCursor = `#!/bin/sh
+[ -n "$FAKE_ARGS_FILE" ] && printf '%s\n' "$@" > "$FAKE_ARGS_FILE"
 case "$1" in
   --version) echo "fake-cursor 2026.0.0"; exit 0 ;;
   status)    echo "Logged in as test@example.com"; exit 0 ;;
+  models)
+    case "$2" in
+      --help) echo 'CURSOR_MODELS_HELP_OK'; exit 0 ;;
+      --fail) echo 'native models error' >&2; exit 7 ;;
+      *) echo 'CURSOR_NATIVE_MODELS_OK'; exit 0 ;;
+    esac ;;
   *)
     echo '{"type":"system","subtype":"init","session_id":"c-1","cwd":"/","model":"fake","permissionMode":"default"}'
     echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"review"}]}}'

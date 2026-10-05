@@ -4,6 +4,23 @@ All notable changes to codexmon are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor versions may change
 behavior).
 
+## v0.12.0
+
+### Added
+
+- `codexmon models --agent codex|claude [--json]` lists current model choices
+  and marks the default. New choices include GPT-6.1 Sol, Claude Opus 5.5,
+  and Claude Sonnet 5.5. Native model overrides remain unrestricted.
+  Text output contains only the table; the informational note goes to stderr.
+- The README and bundled skill list the current model choices. GPT-6 Astra
+  and Claude Fable 5.1 remain the defaults for demanding work.
+
+### Changed
+
+- `models` now belongs to codexmon. Cursor's native `models` command still
+  runs through the monitor. Use `codexmon run --agent cursor -- models` to
+  reach Cursor's native command directly.
+
 ## v0.11.0
 
 ### Changed

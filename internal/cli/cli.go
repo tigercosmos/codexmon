@@ -2,7 +2,7 @@
 //
 // codexmon is a transparent front-end for an AI coding CLI — codex (the
 // default), Claude Code, or the Cursor agent, selected with --agent or
-// CODEXMON_AGENT. Management subcommands (status/list/wait/tail/cancel/doctor/
+// CODEXMON_AGENT. Management subcommands (status/list/wait/tail/cancel/doctor/models/
 // run/start/review) are handled locally; everything else is forwarded to the
 // selected agent verbatim, wrapped in a liveness monitor so a watcher can always
 // tell whether the agent is healthy, slow, stalled, or done.
@@ -26,7 +26,7 @@ import (
 )
 
 // Version is the codexmon build version (overridable via -ldflags).
-var Version = "0.11.0"
+var Version = "0.12.0"
 
 var usage = `codexmon ` + Version + ` — a health-monitoring wrapper around AI coding CLIs (codex/claude/cursor).
 
@@ -42,9 +42,10 @@ USAGE
   codexmon cancel [id]                     Stop a running job
   codexmon clean [--keep-days N] [--keep N] [--all] Remove old finished jobs (never one still running)
   codexmon doctor [--agent A] [--json]     Check that the agent is installed and usable
+  codexmon models [--agent A] [--json]     List model choices (curated for Codex/Claude)
   codexmon version [--agent A]             Print versions
 
-AGENT SELECTION (run/start/review/doctor/version)
+AGENT SELECTION (run/start/review/doctor/models/version)
       --agent NAME           codex (default), claude, or cursor; or set CODEXMON_AGENT
                              With neither set, codexmon tries codex→claude→cursor in
                              order, skipping any that is not installed and (foreground
@@ -105,6 +106,8 @@ func Run(args []string) int {
 		return cmdClean(args[1:])
 	case "doctor":
 		return cmdDoctor(args[1:])
+	case "models":
+		return cmdModels(args[1:])
 	case "__worker":
 		return cmdWorker(args[1:])
 	default:
