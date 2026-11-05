@@ -218,18 +218,19 @@ command directly, use `codexmon run --agent cursor -- models`.
 The defaults prioritize capability for demanding work. These choices follow
 the [OpenAI model documentation](https://learn.chatgpt.com/docs/models) and
 [Claude model documentation](https://platform.claude.com/docs/en/models/overview),
-checked on October 5, 2026.
+checked on November 6, 2026.
 
 | Agent | Model ID | Role |
 |---|---|---|
 | Codex | `gpt-6-astra` | Default; highest capability |
 | Codex | `gpt-6.1-sol` | Near-Astra performance at a lower cost |
+| Codex | `gpt-6.1-terra` | Fast, efficient model for writing, visual work, and computer use |
 | Codex | `gpt-6-sol` | Previous-generation workhorse |
 | Codex | `gpt-6-luna` | Fast, efficient model for focused tasks |
 | Claude | `claude-fable-5-1` | Default; demanding reasoning and long-horizon work |
 | Claude | `claude-opus-5-5` | Long-running agentic coding and knowledge work |
 | Claude | `claude-sonnet-5-5` | Balanced speed and intelligence |
-| Claude | `claude-haiku-4-5` | Fast, efficient model for focused tasks |
+| Claude | `claude-haiku-5-5` | Fast model for high-volume, latency-sensitive tasks |
 
 The list contains curated choices; account and CLI availability can differ.
 Native model arguments remain unrestricted, including models outside the list.

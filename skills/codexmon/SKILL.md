@@ -29,10 +29,10 @@ Headless `claude -p` runs default to `claude-fable-5-1` (Claude Fable 5.1) and
 `--model` to override either.
 
 List current choices with `codexmon models --agent codex|claude [--json]`.
-Codex choices: `gpt-6-astra` (default), `gpt-6.1-sol`, `gpt-6-sol`,
-`gpt-6-luna`.
+Codex choices: `gpt-6-astra` (default), `gpt-6.1-sol`, `gpt-6.1-terra`,
+`gpt-6-sol`, `gpt-6-luna`.
 Claude choices: `claude-fable-5-1` (default), `claude-opus-5-5`,
-`claude-sonnet-5-5`, `claude-haiku-4-5`. Account and CLI availability can
+`claude-sonnet-5-5`, `claude-haiku-5-5`. Account and CLI availability can
 differ.
 Native `--model` arguments remain unrestricted, including models outside the
 list.

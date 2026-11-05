@@ -8,6 +8,6 @@ func (Provider) Models() []agent.Model {
 		{ID: defaultModel, Name: "Claude Fable 5.1", Description: "Demanding reasoning and long-horizon agentic work", Default: true},
 		{ID: "claude-opus-5-5", Name: "Claude Opus 5.5", Description: "Long-running agentic coding and knowledge work"},
 		{ID: "claude-sonnet-5-5", Name: "Claude Sonnet 5.5", Description: "Balanced speed and intelligence"},
-		{ID: "claude-haiku-4-5", Name: "Claude Haiku 4.5", Description: "Fast, efficient model for focused tasks"},
+		{ID: "claude-haiku-5-5", Name: "Claude Haiku 5.5", Description: "Fast model for high-volume, latency-sensitive tasks"},
 	}
 }

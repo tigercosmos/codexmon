@@ -4,6 +4,15 @@ All notable changes to codexmon are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor versions may change
 behavior).
 
+## Unreleased
+
+### Changed
+
+- `codexmon models` now lists GPT-6.1 Terra for Codex and Claude Haiku 5.5 for
+  Claude. Claude Haiku 5.5 replaces Claude Haiku 4.5 in the list. Defaults stay
+  GPT-6 Astra and Claude Fable 5.1, and native `--model` arguments can still
+  select any model.
+
 ## v0.12.0
 
 ### Added
