@@ -26,7 +26,7 @@ import (
 )
 
 // Version is the codexmon build version (overridable via -ldflags).
-var Version = "0.12.0"
+var Version = "0.13.0"
 
 var usage = `codexmon ` + Version + ` — a health-monitoring wrapper around AI coding CLIs (codex/claude/cursor).
 
