@@ -6,6 +6,11 @@ behavior).
 
 ## Unreleased
 
+### Fixed
+
+- Claude runs preserve the `--` prompt boundary. Injected options precede it,
+  and flag-like prompt text does not change defaults or JSON monitoring.
+
 ### Added
 
 - `--effort` supports Claude runs and reviews with `low`, `medium`, `high`,

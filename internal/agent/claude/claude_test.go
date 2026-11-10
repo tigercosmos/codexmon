@@ -272,3 +272,47 @@ func TestAssistantEventAcceptsBareStringContent(t *testing.T) {
 		t.Errorf("result = %q, want the bare string content", ev.Result)
 	}
 }
+
+func TestAnalyzeTerminator(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		opts      []string
+		prompt    []string
+		allowJSON bool
+		inject    []string
+		jsonMode  bool
+	}{
+		{"defaults", []string{"-p"}, []string{"-dash-prompt"}, true, []string{"--model", defaultModel, "--effort", "medium", "--output-format", "stream-json", "--verbose"}, true},
+		{"prompt flags", []string{"-p"}, []string{"--model", "other", "--effort=high", "--output-format", "text", "--verbose", "--"}, true, []string{"--model", defaultModel, "--effort", "medium", "--output-format", "stream-json", "--verbose"}, true},
+		{"no JSON", []string{"--print"}, []string{"--output-format=stream-json"}, false, []string{"--model", defaultModel, "--effort", "medium"}, false},
+		{"explicit options", []string{"-p", "--model=opus", "--effort=high", "--output-format=stream-json", "--verbose"}, []string{"-prompt"}, true, nil, true},
+		{"explicit text", []string{"-p", "--output-format", "text", "--effort", "high"}, []string{"--output-format=stream-json"}, true, []string{"--model", defaultModel}, false},
+		{"prompt print flag", nil, []string{"-p", "--print"}, true, nil, false},
+		{"empty prompt", []string{"-p"}, nil, true, []string{"--model", defaultModel, "--effort", "medium", "--output-format", "stream-json", "--verbose"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append(append(append([]string{}, tc.opts...), "--"), tc.prompt...)
+			original := append([]string{}, args...)
+			want := append(append(append(append([]string{}, tc.opts...), tc.inject...), "--"), tc.prompt...)
+			got := Provider{}.Analyze(args, "", tc.allowJSON)
+			if !reflect.DeepEqual(got.Args, want) || got.JSONMode != tc.jsonMode {
+				t.Fatalf("Analyze = %+v; want args %v, JSON %v", got, want, tc.jsonMode)
+			}
+			if !reflect.DeepEqual(args, original) {
+				t.Fatalf("input mutated: %v", args)
+			}
+		})
+	}
+}
+
+func TestApplyEffortThenAnalyzeTerminator(t *testing.T) {
+	args, err := (Provider{}).ApplyEffort([]string{"-p", "--", "--effort", "low"}, "high")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := Provider{}.Analyze(args, "", true)
+	want := []string{"--effort", "high", "-p", "--model", defaultModel, "--output-format", "stream-json", "--verbose", "--", "--effort", "low"}
+	if !reflect.DeepEqual(got.Args, want) || !got.JSONMode {
+		t.Fatalf("got %+v, want %v", got, want)
+	}
+}

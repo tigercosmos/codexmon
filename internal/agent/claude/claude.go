@@ -45,13 +45,7 @@ func (Provider) ApplyEffort(args []string, effort string) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("unsupported Claude effort %q (want low, medium, high, xhigh, or max)", effort)
 	}
-	opts := args
-	for i, arg := range args {
-		if arg == "--" {
-			opts = args[:i]
-			break
-		}
-	}
+	opts := args[:terminatorIndex(args)]
 	if agent.HasFlag(opts, "--effort") {
 		return nil, errors.New("--effort cannot be combined with a native --effort option")
 	}
@@ -69,7 +63,8 @@ func (Provider) BinCandidates() []string { return []string{"claude"} }
 // print-mode run (interactive `claude` cannot be event-monitored), and respects
 // an output format the caller already chose. A print-mode run also gets the
 // default model and medium effort unless the caller picked a model.
-// An explicit --effort overrides the effort default.
+// An explicit --effort overrides the effort default. Arguments after -- are
+// prompt text; option checks and injected flags stay before that boundary.
 //
 // Both injections are gated on print mode, mirroring how the codex adapter gates
 // on `exec` and the cursor adapter on `-p`: only a headless run takes a model,
@@ -77,17 +72,19 @@ func (Provider) BinCandidates() []string { return []string{"claude"} }
 // forwarded exactly as the user wrote it — one that rejects an unexpected
 // --model would fail for a flag codexmon added behind their back.
 func (Provider) Analyze(args []string, _ string, allowJSON bool) agent.Analysis {
-	out := append([]string(nil), args...)
-	printMode := agent.HasFlag(args, "-p", "--print")
-	if printMode && !agent.HasFlag(args, "--model") {
+	term := terminatorIndex(args)
+	opts := args[:term]
+	out := append([]string(nil), opts...)
+	printMode := agent.HasFlag(opts, "-p", "--print")
+	if printMode && !agent.HasFlag(opts, "--model") {
 		out = append(out, "--model", defaultModel)
-		if !agent.HasFlag(args, "--effort") {
+		if !agent.HasFlag(opts, "--effort") {
 			out = append(out, "--effort", "medium")
 		}
 	}
 	jsonMode := false
 	if allowJSON && printMode {
-		val, present := agent.FlagValue(args, "--output-format")
+		val, present := agent.FlagValue(opts, "--output-format")
 		switch {
 		case !present:
 			out = append(out, "--output-format", "stream-json")
@@ -96,11 +93,22 @@ func (Provider) Analyze(args []string, _ string, allowJSON bool) agent.Analysis 
 			jsonMode = true
 		}
 		// stream-json in print mode requires --verbose to emit per-turn events.
-		if jsonMode && !agent.HasFlag(args, "--verbose") {
+		if jsonMode && !agent.HasFlag(opts, "--verbose") {
 			out = append(out, "--verbose")
 		}
 	}
+	out = append(out, args[term:]...)
 	return agent.Analysis{JSONMode: jsonMode, Args: out, Title: "claude"}
+}
+
+// terminatorIndex separates native options from literal prompt arguments.
+func terminatorIndex(args []string) int {
+	for i, arg := range args {
+		if arg == "--" {
+			return i
+		}
+	}
+	return len(args)
 }
 
 // ReviewArgs runs a headless review with a constructed read-only prompt.
