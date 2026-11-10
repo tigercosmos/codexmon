@@ -18,26 +18,26 @@ func TestModels(t *testing.T) {
 		defaultID string
 		ids       []string
 	}{
-		{"codex", []string{"models", "--json"}, nil, "codex", "gpt-6-astra",
-			[]string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"}},
-		{"claude", []string{"models", "--agent=claude", "--json"}, nil, "claude", "claude-fable-5-1",
-			[]string{"claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"}},
-		{"environment", []string{"models", "--json"}, []string{"CODEXMON_AGENT=claude"}, "claude", "claude-fable-5-1",
-			[]string{"claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"}},
-		{"explicit wins", []string{"models", "--agent", "codex", "--json"}, []string{"CODEXMON_AGENT=claude"}, "codex", "gpt-6-astra",
-			[]string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"}},
-		{"padded environment", []string{"models", "--json"}, []string{"CODEXMON_AGENT= claude "}, "claude", "claude-fable-5-1",
-			[]string{"claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"}},
-		{"blank environment", []string{"models", "--json"}, []string{"CODEXMON_AGENT= \t "}, "codex", "gpt-6-astra",
-			[]string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"}},
-		{"padded flag", []string{"models", "--agent", " claude ", "--json"}, []string{"CODEXMON_AGENT=codex"}, "claude", "claude-fable-5-1",
-			[]string{"claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"}},
-		{"blank flag uses environment", []string{"models", "--agent", " \t ", "--json"}, []string{"CODEXMON_AGENT=claude"}, "claude", "claude-fable-5-1",
-			[]string{"claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"}},
-		{"codex empty terminator", []string{"models", "--json", "--"}, nil, "codex", "gpt-6-astra",
-			[]string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"}},
-		{"claude empty terminator", []string{"models", "--agent", "claude", "--json", "--"}, nil, "claude", "claude-fable-5-1",
-			[]string{"claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"}},
+		{"codex", []string{"models", "--json"}, nil, "codex", "gpt-6.1-sol",
+			[]string{"gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"}},
+		{"claude", []string{"models", "--agent=claude", "--json"}, nil, "claude", "claude-fable-5-2",
+			[]string{"claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"}},
+		{"environment", []string{"models", "--json"}, []string{"CODEXMON_AGENT=claude"}, "claude", "claude-fable-5-2",
+			[]string{"claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"}},
+		{"explicit wins", []string{"models", "--agent", "codex", "--json"}, []string{"CODEXMON_AGENT=claude"}, "codex", "gpt-6.1-sol",
+			[]string{"gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"}},
+		{"padded environment", []string{"models", "--json"}, []string{"CODEXMON_AGENT= claude "}, "claude", "claude-fable-5-2",
+			[]string{"claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"}},
+		{"blank environment", []string{"models", "--json"}, []string{"CODEXMON_AGENT= \t "}, "codex", "gpt-6.1-sol",
+			[]string{"gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"}},
+		{"padded flag", []string{"models", "--agent", " claude ", "--json"}, []string{"CODEXMON_AGENT=codex"}, "claude", "claude-fable-5-2",
+			[]string{"claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"}},
+		{"blank flag uses environment", []string{"models", "--agent", " \t ", "--json"}, []string{"CODEXMON_AGENT=claude"}, "claude", "claude-fable-5-2",
+			[]string{"claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"}},
+		{"codex empty terminator", []string{"models", "--json", "--"}, nil, "codex", "gpt-6.1-sol",
+			[]string{"gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"}},
+		{"claude empty terminator", []string{"models", "--agent", "claude", "--json", "--"}, nil, "claude", "claude-fable-5-2",
+			[]string{"claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := append([]string{"CODEXMON_AGENT=", "CODEXMON_CODEX=/nonexistent/codex", "CODEXMON_CLAUDE=/nonexistent/claude"}, tc.env...)
@@ -103,7 +103,7 @@ func TestModelsTextAndErrors(t *testing.T) {
 		for _, field := range fields {
 			if field == "yes" {
 				defaults++
-				if fields[0] != "claude-fable-5-1" {
+				if fields[0] != "claude-fable-5-2" {
 					t.Errorf("wrong text default: %q", line)
 				}
 			}

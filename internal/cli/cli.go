@@ -54,7 +54,7 @@ AGENT SELECTION (run/start/review/doctor/models/version)
 
 MONITOR FLAGS (run/start/review)
   -b, --background           Detach and return a job id immediately
-      --effort LEVEL         Codex effort: low|medium|high|xhigh|max|ultra
+      --effort LEVEL         Effort: low|medium|high|xhigh|max (Codex also: ultra)
       --wall-timeout S       Hard wall-clock limit in seconds (0=off, default 600)
       --idle-timeout S       Kill after S idle seconds when nothing is in flight (0=off, default 180)
       --tool-timeout S       Kill if one MCP/tool call runs longer than S seconds (0=off, default 120)

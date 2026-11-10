@@ -1,12 +1,47 @@
 package claude
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/tigercosmos/codexmon/internal/agent"
 )
+
+func TestApplyEffort(t *testing.T) {
+	for _, effort := range []string{"low", "medium", "high", "xhigh", "max", " high "} {
+		args := []string{"-p", "review"}
+		got, err := (Provider{}).ApplyEffort(args, effort)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := Provider{}.Analyze(got, "", true)
+		if value, _ := agent.FlagValue(a.Args, "--effort"); value != strings.TrimSpace(effort) {
+			t.Fatalf("effort overwritten: %v", a.Args)
+		}
+		if strings.Count(strings.Join(a.Args, " "), "--effort") != 1 {
+			t.Fatalf("duplicate effort: %v", a.Args)
+		}
+		if !reflect.DeepEqual(args, []string{"-p", "review"}) {
+			t.Fatalf("input mutated: %v", args)
+		}
+	}
+	for _, effort := range []string{"", "ultra", "HIGH", "invalid"} {
+		if _, err := (Provider{}).ApplyEffort(nil, effort); err == nil {
+			t.Fatalf("accepted invalid effort %q", effort)
+		}
+	}
+	for _, args := range [][]string{{"-p", "review", "--effort", "low"}, {"--effort=low", "-p", "review"}} {
+		if _, err := (Provider{}).ApplyEffort(args, "high"); err == nil {
+			t.Fatalf("accepted conflicting effort: %v", args)
+		}
+	}
+	args, err := (Provider{}).ApplyEffort([]string{"-p", "--", "--effort"}, "high")
+	if err != nil || !reflect.DeepEqual(args, []string{"--effort", "high", "-p", "--", "--effort"}) {
+		t.Fatalf("prompt after terminator treated as an option: %v, %v", args, err)
+	}
+}
 
 func TestParseSystemInit(t *testing.T) {
 	ev, ok := Provider{}.ParseLine(`{"type":"system","subtype":"init","session_id":"s1","model":"opus"}`)
@@ -113,7 +148,7 @@ func TestAnalyzeNonPrintNoInject(t *testing.T) {
 }
 
 func TestAnalyzeDefaultsModel(t *testing.T) {
-	// No --model: codexmon pins Claude Fable 5.1.
+	// No --model: codexmon pins Claude Fable 5.2.
 	a := Provider{}.Analyze([]string{"-p", "review my diff"}, "", true)
 	if v, present := agent.FlagValue(a.Args, "--model"); !present || v != defaultModel {
 		t.Errorf("default model = %q present=%v, want %s", v, present, defaultModel)
@@ -142,6 +177,34 @@ func TestAnalyzeDefaultsModel(t *testing.T) {
 	}
 	if a.JSONMode {
 		t.Errorf("json must stay off: %+v", a)
+	}
+}
+
+func TestAnalyzeDefaultEffort(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default", []string{"-p", "review"}, "medium"},
+		{"explicit effort", []string{"-p", "review", "--effort", "high"}, "high"},
+		{"attached effort", []string{"-p", "review", "--effort=low"}, "low"},
+		{"explicit model", []string{"-p", "review", "--model", "opus"}, ""},
+		{"attached model", []string{"-p", "review", "--model=opus"}, ""},
+		{"management", []string{"mcp", "list"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, allowJSON := range []bool{true, false} {
+				a := Provider{}.Analyze(tc.args, "", allowJSON)
+				got, present := agent.FlagValue(a.Args, "--effort")
+				if got != tc.want || present != (tc.want != "") {
+					t.Fatalf("effort = %q, present = %v: %v", got, present, a.Args)
+				}
+				if strings.Count(strings.Join(a.Args, " "), "--effort") > 1 {
+					t.Fatalf("duplicate effort: %v", a.Args)
+				}
+			}
+		})
 	}
 }
 

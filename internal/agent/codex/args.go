@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	defaultModel           = "gpt-6-astra"
+	defaultModel           = "gpt-6.1-sol"
 	defaultReasoningEffort = "high"
 )
 

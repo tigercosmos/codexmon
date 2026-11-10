@@ -217,18 +217,51 @@ func TestBuildJobAppliesCodexEffort(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(spec.Args[:4], []string{
-		"--config", "model_reasoning_effort=ultra", "--model", "gpt-6-astra",
+		"--config", "model_reasoning_effort=ultra", "--model", "gpt-6.1-sol",
 	}) {
 		t.Errorf("job args = %v", spec.Args)
 	}
 }
 
+func TestBuildJobAppliesClaudeReviewEffort(t *testing.T) {
+	t.Setenv("CODEXMON_HOME", t.TempDir())
+	for _, effort := range []string{"", "high", "max"} {
+		args := []string{"--agent", "claude", "--uncommitted"}
+		if effort != "" {
+			args = append(args, "--effort", effort)
+		}
+		cfg, review, err := parseReviewArgs(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		prov, err := agent.Get("claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		native, err := prov.ReviewArgs(review)
+		if err != nil {
+			t.Fatal(err)
+		}
+		spec, _, err := buildJob(cfg, prov, "claude", "/bin/claude", native, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := effort
+		if want == "" {
+			want = "medium"
+		}
+		if got, _ := agent.FlagValue(spec.Args, "--effort"); got != want {
+			t.Fatalf("effort = %q, want %q: %v", got, want, spec.Args)
+		}
+	}
+}
+
 func TestBuildJobRejectsEffortForUnsupportedAgent(t *testing.T) {
-	prov, err := agent.Get("claude")
+	prov, err := agent.Get("cursor")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := buildJob(runConfig{effort: "high"}, prov, "claude", "/bin/claude", []string{"-p", "hi"}, ""); err == nil {
+	if _, _, err := buildJob(runConfig{effort: "high"}, prov, "cursor", "/bin/cursor", []string{"-p", "hi"}, ""); err == nil {
 		t.Error("--effort should fail for a provider without effort support")
 	}
 }

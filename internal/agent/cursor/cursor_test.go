@@ -99,10 +99,10 @@ func TestAnalyzeAndReview(t *testing.T) {
 }
 
 func TestAnalyzeDefaultsModel(t *testing.T) {
-	// No --model: codexmon defaults to Cursor Grok 4.5.
+	// No --model: codexmon defaults to Grok 4.7.
 	a := Provider{}.Analyze([]string{"-p", "review"}, "", true)
-	if v, present := agent.FlagValue(a.Args, "--model"); !present || v != "cursor-grok-4.5-high" {
-		t.Errorf("default model = %q present=%v, want cursor-grok-4.5-high", v, present)
+	if v, present := agent.FlagValue(a.Args, "--model"); !present || v != "grok-4.7" {
+		t.Errorf("default model = %q present=%v, want grok-4.7", v, present)
 	}
 
 	// Caller-specified model wins; codexmon must not append a second --model.

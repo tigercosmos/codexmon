@@ -4,6 +4,19 @@ All notable changes to codexmon are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor versions may change
 behavior).
 
+## Unreleased
+
+### Added
+
+- `--effort` supports Claude runs and reviews with `low`, `medium`, `high`,
+  `xhigh`, and `max`. Conflicting native effort flags produce an error.
+
+### Changed
+
+- Default models are GPT-6.1 Sol with high effort, Claude Fable 5.2 with
+  medium effort, and Cursor Grok 4.7. Model catalogs and documentation match
+  these defaults.
+
 ## v0.13.0
 
 ### Changed

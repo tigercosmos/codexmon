@@ -412,8 +412,8 @@ func TestE2EClaudeDefaultModel(t *testing.T) {
 			t.Fatalf("review exit = %d, stderr=%s", r.code, r.stderr)
 		}
 		got := fakeArgs(t, argsFile)
-		if v := flagValue(got, "--model"); v != "claude-fable-5-1" {
-			t.Errorf("claude ran with --model %q, want claude-fable-5-1: %v", v, got)
+		if v := flagValue(got, "--model"); v != "claude-fable-5-2" {
+			t.Errorf("claude ran with --model %q, want claude-fable-5-2: %v", v, got)
 		}
 	})
 

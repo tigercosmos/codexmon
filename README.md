@@ -187,13 +187,15 @@ run is observable: `--json` + `--output-last-message` for `codex exec`,
 `--output-format stream-json --verbose` for `claude -p`, and
 `--output-format stream-json` for `cursor-agent -p`. Use `--no-json` to opt out;
 without a parseable stream, codexmon falls back to monitoring raw stdout/stderr
-activity. A print-mode run also gets a pinned model unless you pass your own
-`--model`: `claude-fable-5-1` (Claude Fable 5.1) for `claude -p` and
-`cursor-grok-4.5-high` (Cursor Grok 4.5) for `cursor-agent -p`. Management
+activity. Print-mode runs use a pinned model unless you pass your own `--model`.
+Claude uses `claude-fable-5-2` (Claude Fable 5.2) with medium effort.
+Cursor uses `grok-4.7` (Grok 4.7).
+An explicit Claude model suppresses both defaults. Use `--effort` to override
+Claude's effort. Management
 subcommands such as `claude mcp list` or `cursor-agent status` are forwarded
 untouched.
 
-For `codex exec`, codexmon defaults to `gpt-6-astra` (GPT-6 Astra) with `high`
+For `codex exec`, codexmon defaults to `gpt-6.1-sol` (GPT-6.1 Sol) with `high`
 reasoning effort. An explicit model or profile suppresses both defaults.
 Use `--effort` to select another reasoning level.
 
@@ -215,22 +217,23 @@ conflicting flags to Cursor, put them after `--`.
 The `models` command now belongs to codexmon. To reach Cursor's native
 command directly, use `codexmon run --agent cursor -- models`.
 
-The defaults prioritize capability for demanding work. These choices follow
-the [OpenAI model documentation](https://learn.chatgpt.com/docs/models) and
-[Claude model documentation](https://platform.claude.com/docs/en/models/overview),
-checked on November 6, 2026.
+These choices follow the [OpenAI model documentation](https://learn.chatgpt.com/docs/models),
+[Claude model documentation](https://support.claude.com/en/articles/11940350-claude-code-model-configuration),
+and [Cursor model documentation](https://prod.cursor.com/docs/models/grok-4-7),
+checked on November 10, 2026.
 
 | Agent | Model ID | Role |
 |---|---|---|
-| Codex | `gpt-6-astra` | Default; highest capability |
-| Codex | `gpt-6.1-sol` | Near-Astra performance at a lower cost |
+| Codex | `gpt-6.1-sol` | Default; high effort |
+| Codex | `gpt-6-astra` | Highest capability |
 | Codex | `gpt-6.1-terra` | Fast, efficient model for writing, visual work, and computer use |
 | Codex | `gpt-6-sol` | Previous-generation workhorse |
 | Codex | `gpt-6-luna` | Fast, efficient model for focused tasks |
-| Claude | `claude-fable-5-1` | Default; demanding reasoning and long-horizon work |
+| Claude | `claude-fable-5-2` | Default; medium effort |
 | Claude | `claude-opus-5-5` | Long-running agentic coding and knowledge work |
 | Claude | `claude-sonnet-5-5` | Balanced speed and intelligence |
 | Claude | `claude-haiku-5-5` | Fast model for high-volume, latency-sensitive tasks |
+| Cursor | `grok-4.7` | Default; other choices come from Cursor's native model list |
 
 The list contains curated choices; account and CLI availability can differ.
 Native model arguments remain unrestricted, including models outside the list.
@@ -251,7 +254,7 @@ Press Ctrl+C again to force-quit without waiting for the shutdown.
 | Flag | Default | Meaning |
 |---|---|---|
 | `--agent NAME` | `codex` | Which agent runs: `codex`, `claude`, or `cursor` (or set `CODEXMON_AGENT`) |
-| `--effort LEVEL` | `high` | Codex reasoning effort: `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` |
+| `--effort LEVEL` | Agent-specific | Codex/Claude: `low`, `medium`, `high`, `xhigh`, `max`; Codex also supports `ultra` |
 | `-b, --background` | off | Detach and return a job id immediately |
 | `--wall-timeout S` | `600` | Hard wall-clock limit, seconds (`0` = off) |
 | `--idle-timeout S` | `180` | Kill after S idle seconds **when nothing is in flight** (`0` = off) |
@@ -269,10 +272,22 @@ Press Ctrl+C again to force-quit without waiting for the shutdown.
 > agent untouched: `codexmon start --agent claude --wall-timeout 900 -- -p "Review the diff"`.
 > `review` takes only the flags above plus `--uncommitted` / `--base REF`.
 
-`--effort` applies to Codex runs and maps to Codex's
+For Codex, `--effort` maps to its
 `model_reasoning_effort` setting. For example, use
 `codexmon review --agent codex --effort ultra --uncommitted`. Do not combine
 `--effort` with an explicit `-c model_reasoning_effort=...` option.
+
+For Claude, `--effort` maps to its native flag and supports `low`, `medium`,
+`high`, `xhigh`, and `max`. For example:
+
+```sh
+codexmon review --agent claude --effort high --uncommitted
+```
+
+Do not combine this option with a native `--effort` after `--`.
+Claude's `CLAUDE_CODE_EFFORT_LEVEL` environment variable takes precedence over
+the flag. Without an override, codexmon selects medium effort with its default
+Claude model.
 
 ## The watchdog (what makes it "monitoring")
 

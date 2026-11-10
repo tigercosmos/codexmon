@@ -1,7 +1,7 @@
 // Package claude adapts Anthropic's Claude Code CLI (`claude`) to codexmon's
 // agent contract. A headless review runs `claude -p "<prompt>"`; to make it
 // observable, codexmon adds `--output-format stream-json --verbose`, defaults
-// `--model claude-fable-5-1` (unless the caller picked a model), then parses the
+// `--model claude-fable-5-2` (unless the caller picked a model), then parses the
 // resulting newline-delimited event stream:
 //
 //	{"type":"system","subtype":"init","session_id":"...","model":"..."}
@@ -18,6 +18,7 @@ package claude
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -26,13 +27,36 @@ import (
 
 // defaultModel is the Claude model codexmon selects when the caller hasn't
 // chosen one with --model. Claude Code's own default follows the user's account
-// setting; we pin Claude Fable 5.1 so headless runs use a known model. The full
+// setting; we pin Claude Fable 5.2 so headless runs use a known model. The full
 // name is used rather than the `fable` alias so the model can't shift under a
 // stored run when the alias moves to a later release.
-const defaultModel = "claude-fable-5-1"
+const defaultModel = "claude-fable-5-2"
 
 // Provider drives the Claude Code CLI.
 type Provider struct{}
+
+var _ agent.EffortProvider = Provider{}
+
+// ApplyEffort maps codexmon's effort option to Claude's native flag.
+func (Provider) ApplyEffort(args []string, effort string) ([]string, error) {
+	effort = strings.TrimSpace(effort)
+	switch effort {
+	case "low", "medium", "high", "xhigh", "max":
+	default:
+		return nil, fmt.Errorf("unsupported Claude effort %q (want low, medium, high, xhigh, or max)", effort)
+	}
+	opts := args
+	for i, arg := range args {
+		if arg == "--" {
+			opts = args[:i]
+			break
+		}
+	}
+	if agent.HasFlag(opts, "--effort") {
+		return nil, errors.New("--effort cannot be combined with a native --effort option")
+	}
+	return append([]string{"--effort", effort}, args...), nil
+}
 
 func init() { agent.Register(Provider{}) }
 
@@ -44,7 +68,8 @@ func (Provider) BinCandidates() []string { return []string{"claude"} }
 // can monitor the event stream and capture the result. It only does so for a
 // print-mode run (interactive `claude` cannot be event-monitored), and respects
 // an output format the caller already chose. A print-mode run also gets the
-// default model unless the caller picked one.
+// default model and medium effort unless the caller picked a model.
+// An explicit --effort overrides the effort default.
 //
 // Both injections are gated on print mode, mirroring how the codex adapter gates
 // on `exec` and the cursor adapter on `-p`: only a headless run takes a model,
@@ -56,6 +81,9 @@ func (Provider) Analyze(args []string, _ string, allowJSON bool) agent.Analysis 
 	printMode := agent.HasFlag(args, "-p", "--print")
 	if printMode && !agent.HasFlag(args, "--model") {
 		out = append(out, "--model", defaultModel)
+		if !agent.HasFlag(args, "--effort") {
+			out = append(out, "--effort", "medium")
+		}
 	}
 	jsonMode := false
 	if allowJSON && printMode {

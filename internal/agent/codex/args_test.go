@@ -65,7 +65,7 @@ func TestAnalyzeExecInjectsJSON(t *testing.T) {
 func TestAnalyzeExecDefaultsModelAndReasoningEffort(t *testing.T) {
 	a := Analyze([]string{"exec", "hi"}, "", false)
 	wantPrefix := []string{
-		"--model", "gpt-6-astra",
+		"--model", "gpt-6.1-sol",
 		"--config", "model_reasoning_effort=high",
 		"exec",
 	}

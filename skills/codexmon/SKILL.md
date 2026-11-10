@@ -20,18 +20,21 @@ Pick the agent with `--agent codex|claude|cursor` (on `run`/`start`/`review`/
 `doctor`/`models`/`version`) or the `CODEXMON_AGENT` env var. The default is
 `codex`.
 
-For `codex exec`, the default model is `gpt-6-astra` (GPT-6 Astra) with `high`
+For `codex exec`, the default model is `gpt-6.1-sol` (GPT-6.1 Sol) with `high`
 reasoning effort. An explicit model or profile suppresses both defaults.
 Use `--effort low|medium|high|xhigh|max|ultra` to select another reasoning level.
 
-Headless `claude -p` runs default to `claude-fable-5-1` (Claude Fable 5.1) and
-`cursor-agent -p` runs to `cursor-grok-4.5-high` (Cursor Grok 4.5). Pass your own
-`--model` to override either.
+Headless `claude -p` runs default to `claude-fable-5-2` (Claude Fable 5.2) with
+medium effort. Headless `cursor-agent -p` runs default to `grok-4.7` (Grok 4.7).
+Pass your own `--model` to override either. An explicit Claude model also
+suppresses the effort default. Use `--effort low|medium|high|xhigh|max` to
+override Claude's effort, including on `review`. Do not combine it with a
+native `--effort`. `CLAUDE_CODE_EFFORT_LEVEL` takes precedence over the flag.
 
 List current choices with `codexmon models --agent codex|claude [--json]`.
-Codex choices: `gpt-6-astra` (default), `gpt-6.1-sol`, `gpt-6.1-terra`,
+Codex choices: `gpt-6.1-sol` (default), `gpt-6-astra`, `gpt-6.1-terra`,
 `gpt-6-sol`, `gpt-6-luna`.
-Claude choices: `claude-fable-5-1` (default), `claude-opus-5-5`,
+Claude choices: `claude-fable-5-2` (default), `claude-opus-5-5`,
 `claude-sonnet-5-5`, `claude-haiku-5-5`. Account and CLI availability can
 differ.
 Native `--model` arguments remain unrestricted, including models outside the
@@ -82,6 +85,7 @@ codexmon cancel "$ID"
   - Uncommitted changes: `codexmon review --agent <name> --uncommitted`
   - Against a base branch: `codexmon review --agent <name> --base main`
   - Codex effort: add `--effort low|medium|high|xhigh|max|ultra`.
+  - Claude effort: add `--effort low|medium|high|xhigh|max`.
   - Add `-b` to run detached and poll (as above).
 - **Raw passthrough (full control):** anything that isn't a codexmon subcommand
   is passed to the selected agent verbatim, after `--`:
