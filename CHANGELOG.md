@@ -4,12 +4,7 @@ All notable changes to codexmon are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor versions may change
 behavior).
 
-## Unreleased
-
-### Fixed
-
-- Claude runs preserve the `--` prompt boundary. Injected options precede it,
-  and flag-like prompt text does not change defaults or JSON monitoring.
+## v0.14.0
 
 ### Added
 
@@ -21,6 +16,11 @@ behavior).
 - Default models are GPT-6.1 Sol with high effort, Claude Fable 5.2 with
   medium effort, and Cursor Grok 4.7. Model catalogs and documentation match
   these defaults.
+
+### Fixed
+
+- Claude runs preserve the `--` prompt boundary. Injected options precede it,
+  and flag-like prompt text does not change defaults or JSON monitoring.
 
 ## v0.13.0
 
